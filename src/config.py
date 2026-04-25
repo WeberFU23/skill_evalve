@@ -24,11 +24,6 @@ class AgenticMemoryConfig:
         self.max_ops = 30  # Maximum number of operations in the bank
         self.initial_ops = ["insert", "update", "delete", "noop"]
         self.skip_noop = False  # Skip noop in initial operations
-        self.tree_routing_top_k = 3  # Per-level child preselection size for hierarchical routing
-        self.tree_routing_max_depth = 6  # Maximum number of routing hops
-        self.tree_router_model = None  # LLM model for path-aware routing; defaults to designer/model
-        self.tree_summary_model = None  # LLM model for skill summary; defaults to tree_router_model
-        self.hard_problem_updater_model = None  # LLM model for hard-problem-driven skill tree updates
 
         # Controller settings
         self.controller_hidden_dim = 256
@@ -166,12 +161,6 @@ class AgenticMemoryConfig:
             self.mem_top_k_eval = self.mem_top_k
         if self.designer_model is None:
             self.designer_model = getattr(args, "model", None)
-        if self.tree_router_model is None:
-            self.tree_router_model = self.designer_model
-        if self.tree_summary_model is None:
-            self.tree_summary_model = self.tree_router_model
-        if self.hard_problem_updater_model is None:
-            self.hard_problem_updater_model = self.tree_router_model
         return self
 
 
@@ -256,16 +245,6 @@ def get_agentic_memory_args():
                         help='Maximum number of operations in the bank')
     parser.add_argument('--skip-noop', action='store_true',
                         help='Skip noop operation in the initial operation bank')
-    parser.add_argument('--tree-routing-top-k', type=int, default=3,
-                        help='Top-k children retained by embedding search at each tree level')
-    parser.add_argument('--tree-routing-max-depth', type=int, default=6,
-                        help='Maximum routing depth for hierarchical skill traversal')
-    parser.add_argument('--tree-router-model', type=str, default=None,
-                        help='Model for path-aware tree routing; defaults to --designer-model/--model')
-    parser.add_argument('--tree-summary-model', type=str, default=None,
-                        help='Model for route-conditioned skill summarization; defaults to tree router model')
-    parser.add_argument('--hard-problem-updater-model', type=str, default=None,
-                        help='Model for hard-problem-driven skill tree updates; defaults to tree router model')
 
     # Encoder args
     parser.add_argument('--state-encoder', type=str, default='Qwen/Qwen3-Embedding-0.6B',
