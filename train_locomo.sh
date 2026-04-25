@@ -12,7 +12,7 @@ python main.py \
     --designer-model "glm-5.1" \
     --api \
     --api-base "https://open.bigmodel.cn/api/paas/v4/" \
-    --api-key "847d6fee3e8b451ab818be188da47445.FGVwGlyUhpq5OFMe" "3e11a733dc044dc58910ed6fdeb740d3.aT7i5zp2LSOIVOFu" \
+    --api-key "" \
     --retriever contriever \
     --state-encoder sentence-transformers/all-MiniLM-L6-v2 \
     --op-encoder sentence-transformers/all-MiniLM-L6-v2 \

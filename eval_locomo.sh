@@ -22,7 +22,7 @@ python main.py \
     --llm-judge-model "deepseek/deepseek-v3.2" \
     --api \
     --api-base "https://openrouter.ai/api/v1" \
-    --api-key "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" "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" \
+    --api-key "" \
     --retriever contriever \
     --state-encoder sentence-transformers/all-MiniLM-L6-v2 \
     --op-encoder sentence-transformers/all-MiniLM-L6-v2 \
