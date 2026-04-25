@@ -132,6 +132,16 @@ class SkillTreeSelection:
     def selected_paths(self) -> List[str]:
         return [node.path for node in self.selected_nodes]
 
+    def prompt_context(self, max_chars_per_node: int = 2000) -> str:
+        """Assemble selected skill node contents for a downstream prompt."""
+        blocks = []
+        for node in self.selected_nodes:
+            text = node.instruction_text()
+            if len(text) > max_chars_per_node:
+                text = text[:max_chars_per_node] + "\n...[truncated]"
+            blocks.append(f"## Skill: {node.path}\n{text}")
+        return "\n\n".join(blocks)
+
 
 class SkillTree:
     """Load and query a directory-backed skill tree."""

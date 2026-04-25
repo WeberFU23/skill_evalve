@@ -82,6 +82,15 @@ class AgenticMemoryConfig:
         self.designer_max_changes = 1  # Max number of skill changes per evolution cycle
         self.designer_refine_only = False  # If true, ignore add_new operation changes
 
+        # Skill tree settings
+        self.enable_skill_tree = False
+        self.skill_tree_dir = "./skills"
+        self.skill_tree_top_k = 3
+        self.skill_tree_max_depth = 4
+        self.enable_skill_tree_evolution = False
+        self.skill_tree_failure_pool_size = 1000
+        self.skill_tree_evolution_min_cases = 2
+
         # Evolution feedback and early stopping
         self.max_designer_evolves = 6  # Maximum number of evolution cycles before stopping
         self.designer_early_stop_patience = 3  # Stop if no improvement for N consecutive evolves
@@ -324,6 +333,22 @@ def get_agentic_memory_args():
                         help='Use moving average over tail instead of raw mean for stage reward')
     parser.add_argument('--stage-reward-window', type=int, default=5,
                         help='Window size for moving average stage reward (>=1)')
+
+    # Skill tree args
+    parser.add_argument('--enable-skill-tree', action='store_true',
+                        help='Enable directory-backed hierarchical skill tree utilities')
+    parser.add_argument('--skill-tree-dir', type=str, default='./skills',
+                        help='Root directory for skill tree markdown files')
+    parser.add_argument('--skill-tree-top-k', type=int, default=3,
+                        help='Top-k visible children considered at each skill-tree routing step')
+    parser.add_argument('--skill-tree-max-depth', type=int, default=4,
+                        help='Maximum depth for skill-tree routing')
+    parser.add_argument('--enable-skill-tree-evolution', action='store_true',
+                        help='Enable path-grounded skill-tree hard-case collection/evolution')
+    parser.add_argument('--skill-tree-failure-pool-size', type=int, default=1000,
+                        help='Maximum hard cases kept for skill-tree evolution')
+    parser.add_argument('--skill-tree-evolution-min-cases', type=int, default=2,
+                        help='Minimum cases in a path bucket before skill-tree evolution')
 
     # Misc
     parser.add_argument('--seed', type=int, default=42)

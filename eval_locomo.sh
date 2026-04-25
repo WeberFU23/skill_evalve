@@ -17,11 +17,11 @@ python main.py \
     --load-checkpoint "./checkpoints/locomo_with_designer_lite/locomo-train-lite_epoch_final.pt" \
     --dataset locomo \
     --data-file "./data/locomo10.json" \
-    --model "deepseek/deepseek-v3.2" \
-    --designer-model "deepseek/deepseek-v3.2" \
-    --llm-judge-model "deepseek/deepseek-v3.2" \
+    --model "" \
+    --designer-model "" \
+    --llm-judge-model "" \
     --api \
-    --api-base "https://openrouter.ai/api/v1" \
+    --api-base "" \
     --api-key "" \
     --retriever contriever \
     --state-encoder sentence-transformers/all-MiniLM-L6-v2 \

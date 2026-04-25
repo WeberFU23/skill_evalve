@@ -8,10 +8,10 @@ export CUDA_VISIBLE_DEVICES=0
 python main.py \
     --dataset locomo \
     --data-file "./data/locomo10.json" \
-    --model "glm-5.1" \
-    --designer-model "glm-5.1" \
+    --model "" \
+    --designer-model "" \
     --api \
-    --api-base "https://open.bigmodel.cn/api/paas/v4/" \
+    --api-base "" \
     --api-key "" \
     --retriever contriever \
     --state-encoder sentence-transformers/all-MiniLM-L6-v2 \

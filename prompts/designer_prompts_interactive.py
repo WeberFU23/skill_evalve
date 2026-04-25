@@ -1,167 +1,169 @@
 """
-Designer prompts for interactive ALFWorld-style training.
+Designer prompts for interactive or embodied tasks such as ALFWorld.
 """
 
-INTERACTIVE_DESIGNER_ANALYSIS_PROMPT = """You are an expert analyst for a memory-augmented interactive agent. Analyze failure cases to determine how memory management skills should change.
 
-## How This System Works
-1. **Memory Storage**: The system applies memory management skills to trajectory text to store useful experience.
-2. **Memory Retrieval**: At action time, it retrieves relevant memories using the task objective as a query.
-3. **Action Selection**: An LLM chooses actions using retrieved memories and the accumulated interaction context.
+INTERACTIVE_DESIGNER_ANALYSIS_PROMPT = """You are an expert analyst for a memory-augmented interactive agent. Analyze the failures and decide whether the memory skills should change.
 
-## Task Context (Why Memory Matters)
-- Text-only, partially observable environment: the agent only sees current observations and must infer state changes across steps.
-- Long-horizon, multi-step goals (e.g., find, take, clean/heat/cool, place, examine).
-- Actions have preconditions and state constraints: containers must be open, objects must be held, devices must be on/off, and locations must be reached before interacting.
-- Observations reveal object locations and states; inventory is critical evidence.
-- Skills are applied to trajectories, so they should capture reusable procedures, preconditions, and state transitions without hard-coding instance IDs.
+## System Model
+- The agent receives partial observations over a trajectory.
+- Memory skills decide how to preserve reusable procedures, object states, locations, action preconditions, and constraints.
+- Memory content stores concrete episode facts. Skills must remain reusable instructions for how to remember.
+- A hierarchical skill tree may first route to an embodied-task subtree, then to a more specific skill.
 
-Failures can occur at any stage:
-- **Storage failure**: Important procedures or constraints were never stored (skill missing or misapplied).
-- **Retrieval failure**: Relevant memory exists but was not retrieved for the objective.
-- **Memory quality failure**: Memory exists but is too vague, missing key steps, or not actionable.
+## Interactive Failure Types
+- storage_failure: Important state, procedure, or constraint was never stored.
+- memory_quality_failure: Stored memory is too vague, missing steps, missing state changes, or not actionable.
+- retrieval_failure: Useful memory exists but was not retrieved for the objective.
+- routing_failure: The wrong skill path/subtree was used.
+- compression_failure: Relevant selected skills were compressed into a prompt that lost key constraints.
+- policy_failure: Memory was adequate, but the action model still chose poorly.
 
-## Current Memory Management Skills
+## Current Memory Skills
 {operation_bank_description}
 
-## Operation Evolution Feedback
+## Evolution Feedback
 {evolution_feedback}
 
 ## Failure Cases ({num_failure_cases} cases)
 {failure_cases_details}
 
 ## Analysis Instructions
-This is round 1 of a reflection loop. Produce a strong initial analysis that can be critiqued and improved.
-1. For each case, check whether retrieved memories contain the missing procedure, constraints, or key objects.
-2. If missing, decide whether it was never stored (storage failure) or stored but too weak (memory quality failure).
-3. If the memory is present but not retrieved, label it retrieval failure and avoid changing skills unless the pattern repeats.
-4. Group cases into patterns tied to objectives, object types, temporal steps, state transitions, or action constraints.
-5. For each pattern, propose a concrete skill change: add a new skill or refine an existing one.
-6. Provide up to {max_changes} recommendations total (use fewer if only one change is justified).
+This is round 1 of a reflection loop.
+1. Determine whether each failure is caused by memory storage/quality/routing, or by retrieval/policy issues.
+2. Look for repeated patterns involving object location, state transitions, action preconditions, inventory, containers, devices, or goal ordering.
+3. Propose skill changes only for reusable memory-management behavior.
+4. Do not hard-code exact room names, object IDs, game files, or episode-specific plans as skills.
+5. Prefer refining an implicated skill before adding a new child skill.
+6. Provide up to {max_changes} recommendations total.
 {new_skill_hint}
 
 ## Output Format
-Provide your analysis as JSON:
+Return JSON only:
 {{
     "failure_patterns": [
         {{
-            "pattern_name": "<descriptive name for this failure pattern>",
-            "affected_cases": [<list of case numbers, e.g., 1, 3, 5>],
-            "root_cause": "<storage_failure|retrieval_failure|memory_quality_failure>",
-            "explanation": "<why this pattern of failures is occurring>",
-            "potential_fix": "<what kind of operation change could address this>"
+            "pattern_name": "<short name>",
+            "affected_cases": [<case numbers>],
+            "root_cause": "<storage_failure|memory_quality_failure|retrieval_failure|routing_failure|compression_failure|policy_failure>",
+            "explanation": "<why this happened>",
+            "potential_fix": "<specific skill change if justified>"
         }}
     ],
     "recommendations": [
         {{
             "action": "<add_new_operation|refine_existing_operation|no_change>",
-            "target_operation": "<operation name to refine, or null if adding new>",
-            "rationale": "<clear explanation of why this is the best improvement>",
+            "target_operation": "<operation name or null>",
+            "rationale": "<why this is justified>",
             "priority": "<high|medium|low>"
         }}
     ],
-    "summary": "<1-2 sentence summary of main findings>"
+    "summary": "<1-2 sentence summary>"
 }}
 
 Output ONLY the JSON, no other text.
 """
 
 
-INTERACTIVE_DESIGNER_REFLECTION_PROMPT = """You are in a reflection cycle ({reflection_round}/{reflection_round_total}) for analyzing interactive failure cases. Critique the previous analysis and improve it.
+INTERACTIVE_DESIGNER_REFLECTION_PROMPT = """You are in reflection cycle ({reflection_round}/{reflection_round_total}) for interactive memory-skill failure analysis. Critique and improve the previous analysis.
 
-## Previous Analysis (from prior round)
+## Previous Analysis
 {analysis_feedback}
 
-## Current Memory Management Skills
+## Current Memory Skills
 {operation_bank_description}
 
-## Operation Evolution Feedback
+## Evolution Feedback
 {evolution_feedback}
 
 ## Failure Cases ({num_failure_cases} cases)
 {failure_cases_details}
 
 ## Reflection Instructions
-- Check for missing or misclassified failure patterns.
-- Validate root_cause labels against the objectives and retrieved memories.
-- Strengthen potential_fix suggestions so they are specific and actionable, especially for preconditions, object states, and reusable subgoals.
-- Keep the same output format and output only JSON.
-- Provide up to {max_changes} recommendations total (use fewer if only one change is justified).
+- Verify that proposed changes address reusable memory behavior, not one episode's plan.
+- Separate memory failures from policy/action-selection failures.
+- Strengthen fixes around object states, locations, preconditions, inventory, and reusable subgoals.
+- Remove recommendations unsupported by repeated evidence.
+- Provide up to {max_changes} recommendations total.
 {new_skill_hint}
 
 ## Output Format
-Provide your analysis as JSON:
+Return JSON only:
 {{
     "failure_patterns": [
         {{
-            "pattern_name": "<descriptive name for this failure pattern>",
-            "affected_cases": [<list of case numbers, e.g., 1, 3, 5>],
-            "root_cause": "<storage_failure|retrieval_failure|memory_quality_failure>",
-            "explanation": "<why this pattern of failures is occurring>",
-            "potential_fix": "<what kind of operation change could address this>"
+            "pattern_name": "<short name>",
+            "affected_cases": [<case numbers>],
+            "root_cause": "<storage_failure|memory_quality_failure|retrieval_failure|routing_failure|compression_failure|policy_failure>",
+            "explanation": "<why this happened>",
+            "potential_fix": "<specific skill change if justified>"
         }}
     ],
     "recommendations": [
         {{
             "action": "<add_new_operation|refine_existing_operation|no_change>",
-            "target_operation": "<operation name to refine, or null if adding new>",
-            "rationale": "<clear explanation of why this is the best improvement>",
+            "target_operation": "<operation name or null>",
+            "rationale": "<why this is justified>",
             "priority": "<high|medium|low>"
         }}
     ],
-    "summary": "<1-2 sentence summary of main findings>"
+    "summary": "<1-2 sentence summary>"
 }}
 
 Output ONLY the JSON, no other text.
 """
 
 
-INTERACTIVE_DESIGNER_REFINEMENT_PROMPT = """Based on the failure analysis, propose a specific improvement to the memory operation bank for interactive tasks.
+INTERACTIVE_DESIGNER_REFINEMENT_PROMPT = """Based on the failure analysis, propose concrete improvements to the interactive memory skill bank.
 
-## Failure Analysis (from Stage 1)
+## Failure Analysis
 {analysis_feedback}
 
 ## Current Operation Bank
 {operation_bank_full}
 
+## Evolution Feedback
 {evolution_feedback}
 
-## Your Task
-Propose up to {max_changes} improvements based on the analysis:
+## Task
+Propose up to {max_changes} improvements.
 
-**Option A - Add New Operation**: Create a new operation if the analysis shows a capability gap.
-**Option B - Refine Existing Operation**: Improve an existing operation if memories are too vague or miss key steps.
-**Option C - No Change**: If failures are due to retrieval issues or the operations are already well-designed.
+Option A - Add New Operation:
+Create a specialized skill for a reusable trajectory-memory need, such as state transitions, object locations, preconditions, inventory, or goal ordering.
+
+Option B - Refine Existing Operation:
+Improve a skill whose trigger, scope, steps, or constraints are too weak.
+
+Option C - No Change:
+Use this when failures are retrieval, policy, environment stochasticity, or insufficient evidence.
 
 {new_skill_hint}
 
-## CRITICAL Requirements
-1. instruction_template MUST be a skill-style guide and MUST NOT include context placeholders.
-2. instruction_template MUST clearly state purpose, when to use, and constraints.
-3. instruction_template MUST specify the allowed action type (INSERT or UPDATE only).
-4. For new operations, update_type must be "insert" or "update".
-5. Avoid marketing adjectives; keep phrasing neutral and task-specific.
-6. Do NOT embed output blocks; the executor handles output formatting.
-7. Templates should generalize across task instances; avoid hard-coding object IDs or exact room names.
-8. The number of changes MUST be <= {max_changes}.
-9. Do NOT modify the same operation more than once in a single response.
+## Requirements
+1. Skills must generalize across task instances and must not hard-code exact room names, object IDs, game files, or private episode facts.
+2. instruction_template must be a skill-style guide with Purpose, When to use, How to apply, Constraints, and Action type.
+3. instruction_template must not include context placeholders.
+4. New operations may use only update_type "insert" or "update".
+5. Make descriptions short and embedding-friendly.
+6. The number of changes must be <= {max_changes}.
+7. Do not modify the same operation more than once.
 
 ## Output Format
-Respond with ONE of these JSON structures:
+Return one JSON object.
 
-### One or more changes (up to {max_changes}):
+### Changes
 {{
     "action": "apply_changes",
-    "summary": "<overall rationale for the set of changes>",
+    "summary": "<overall rationale>",
     "changes": [
         {{
             "action": "add_new",
             "new_operation": {{
                 "name": "<snake_case_name>",
-                "description": "<what it does and when to use it>",
-                "instruction_template": "<skill-style instruction template>",
+                "description": "<embedding-friendly description>",
+                "instruction_template": "Skill: ...\\nPurpose: ...\\nWhen to use:\\n- ...\\nHow to apply:\\n- ...\\nConstraints:\\n- ...\\nAction type: INSERT only.",
                 "update_type": "<insert|update>",
-                "reasoning": "<how this addresses the identified failures>"
+                "reasoning": "<how this addresses the failures>"
             }}
         }},
         {{
@@ -170,18 +172,18 @@ Respond with ONE of these JSON structures:
                 "name": "<existing_operation_name>",
                 "changes": {{
                     "description": "<improved description>",
-                    "instruction_template": "<improved template>"
+                    "instruction_template": "<improved skill-style instruction template>"
                 }},
-                "reasoning": "<how these changes address the identified failures>"
+                "reasoning": "<how this addresses the failures>"
             }}
         }}
     ]
 }}
 
-### No changes needed:
+### No Change
 {{
     "action": "no_change",
-    "reasoning": "<why the current operations are sufficient>"
+    "reasoning": "<why no skill change is justified>"
 }}
 
 Output ONLY the JSON, no other text.

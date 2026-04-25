@@ -1,27 +1,37 @@
+"""Prompt pool for answer generation and evaluation."""
 
-CONV_START_PROMPT = "Below is a conversation between two people: {} and {}. The conversation takes place over multiple days and the date of each conversation is wriiten at the beginning of the conversation.\n\n"
+
+CONV_START_PROMPT = (
+    "Below is a conversation between two people: {} and {}. "
+    "The conversation spans multiple days; dates are written at the beginning "
+    "of each conversation segment.\n\n"
+)
 
 
 QA_PROMPT = """
-Based on the above context, write an answer in the form of a short phrase for the following question. Answer with exact words from the context whenever possible.
+Answer the question using the provided context and retrieved memories. Give a short phrase when possible. Use exact words from the context when they are sufficient.
 
 Question: {} Short answer:
 """
 
 
-
 LONGMEMEVAL_ANSWER_PROMPT = """
-I will give you several history chats between you and a user. Please answer the question based on the relevant chat history.
-\n\n\nHistory Chats:\n\n{}\n\nCurrent Date: {}\nQuestion: {}\nShort Answer:
+You will receive several historical chats between you and a user. Answer the current question using only relevant chat history and the current date.
+
+History Chats:
+
+{}
+
+Current Date: {}
+Question: {}
+Short Answer:
 """
 
 
 LLM_JUDGE_GENERAL_PROMPT = """
-You are an expert judge evaluating the quality of an answer for a QA task.
-Your goal is to determine whether the model's answer correctly and sufficiently
-answers the given question.
+You are an objective judge for a QA task.
 
-Read the following information carefully:
+Evaluate whether the model answer correctly answers the question using the ground truth answers. Ignore wording differences when the meaning is equivalent.
 
 [Question]
 {question}
@@ -32,47 +42,33 @@ Read the following information carefully:
 [Model Answer]
 {model_answer}
 
-Your evaluation criteria:
-1. Correctness:
-   - Is the model answer factually consistent with ANY of the correct answers?
-   - Does it avoid contradictions or introducing false information?
+Criteria:
+1. Correctness: Is the answer factually consistent with any acceptable ground truth?
+2. Relevance: Does it directly answer the question without unsupported additions?
+3. Completeness: Does it include the essential information needed to answer?
 
-2. Relevance:
-   - Does the answer address the question directly without unnecessary content?
+Scoring:
+- 1.0: fully correct and complete.
+- 0.5: partially correct, incomplete, or slightly imprecise.
+- 0.0: incorrect, irrelevant, unsupported, or contradictory.
 
-3. Completeness:
-   - Does the answer include all essential information needed to fully answer the question?
-   - Partial answers are allowed but should receive lower scores.
-
-Scoring Rules:
-- Score = 1.0 if the answer is fully correct.
-- Score = 0.5 if the answer is partially correct but incomplete or slightly inaccurate.
-- Score = 0.0 if the answer is incorrect, irrelevant, or contradicts the ground truth.
-
-Output Format (STRICT):
-Return your output as a JSON dictionary with two fields:
+Return only JSON:
 {{
-    "explanation": "<brief explanation of your reasoning>",
+    "explanation": "<brief reason>",
     "score": <0.0 | 0.5 | 1.0>
 }}
-
-Be concise and objective. Do not include anything outside the JSON.
 """
 
 
-
-HOTPOTQA_ANSWER_PROMPT = """Based on the following context, answer the question. The question may require reasoning across multiple pieces of information.
+HOTPOTQA_ANSWER_PROMPT = """Answer the question from the context. The question may require combining multiple pieces of evidence.
 
 {context}
 
 Question: {question}
 
 Instructions:
-- Read the context carefully and identify relevant information
-- If the answer can be found in the context, provide a short, precise answer
-- Output your answer within <answer></answer> tags
+- Identify the relevant evidence before answering.
+- If the answer is present, provide a short precise answer.
+- Output only the final answer inside <answer></answer> tags.
 
 <answer>your answer here</answer>"""
-
-
-

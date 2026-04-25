@@ -25,6 +25,12 @@ from src.memory_bank import MemoryBank
 from src.operation_bank import OperationBank
 from src.executor import Executor
 from src.designer import Designer, DesignerCase, EvolutionSnapshotManager
+from src.skill_tree import SkillTree, SkillTreeSelector
+from src.skill_tree_evolution import (
+    SkillHardCaseCollector,
+    SkillTreeEvolutionDesigner,
+    hard_case_from_selection,
+)
 from src.data_processing import get_processor, DataProcessor
 from src.data_processing.alfworld import (
     ALFWorldOfflineDataset,
@@ -126,6 +132,42 @@ class BaseTrainer:
 
         # Setup logging (before Designer so it can use the logger)
         self.logger = self._setup_logging()
+
+        self.skill_tree = None
+        self.skill_tree_selector = None
+        self.skill_hard_case_collector = None
+        self.skill_tree_designer = None
+        if getattr(config, 'enable_skill_tree', False):
+            self.skill_tree = SkillTree(
+                root_dir=getattr(config, 'skill_tree_dir', './skills'),
+                encoder=self.op_encoder
+            )
+            self.skill_tree_selector = SkillTreeSelector(
+                tree=self.skill_tree,
+                encoder=self.op_encoder,
+                controller=self.controller,
+                device=self.device,
+                top_k=getattr(config, 'skill_tree_top_k', 3),
+                max_depth=getattr(config, 'skill_tree_max_depth', 4)
+            )
+            self.log(f"Loaded skill tree with {len(self.skill_tree.nodes_by_path)} nodes")
+
+        if getattr(config, 'enable_skill_tree_evolution', False):
+            if self.skill_tree is None:
+                self.skill_tree = SkillTree(
+                    root_dir=getattr(config, 'skill_tree_dir', './skills'),
+                    encoder=self.op_encoder
+                )
+            self.skill_hard_case_collector = SkillHardCaseCollector(
+                max_cases=getattr(config, 'skill_tree_failure_pool_size', 1000),
+                logger=self.logger
+            )
+            self.skill_tree_designer = SkillTreeEvolutionDesigner(
+                args,
+                tree=self.skill_tree,
+                logger=self.logger,
+                max_cases_per_prompt=getattr(config, 'designer_samples_per_cluster', 3)
+            )
 
         # Initialize Designer with shared encoder for clustering
         if args.enable_designer:
@@ -464,6 +506,70 @@ class BaseTrainer:
         case_collector_state = designer_state.get('case_collector', None)
         if case_collector_state is not None:
             self.designer.case_collector.load_dict(case_collector_state)
+
+    def _get_skill_tree_evolution_state(self) -> Optional[Dict]:
+        if self.skill_hard_case_collector is None:
+            return None
+        return {
+            'hard_case_collector': self.skill_hard_case_collector.to_dict()
+        }
+
+    def _restore_skill_tree_evolution_state(self, checkpoint: Dict):
+        state = checkpoint.get('skill_tree_evolution_state', None)
+        if state is None:
+            return
+        if self.skill_hard_case_collector is None:
+            self.log(
+                "Checkpoint contains skill_tree_evolution_state but skill-tree evolution "
+                "is disabled; skipping restore.",
+                level='warning'
+            )
+            return
+        collector_state = state.get('hard_case_collector') if isinstance(state, dict) else None
+        if collector_state is not None:
+            self.skill_hard_case_collector.load_dict(collector_state)
+
+    def record_skill_tree_hard_case(self, problem_id: str, query: str, selection,
+                                    context: str = "", prediction: str = "",
+                                    ground_truth: str = "", reward: float = 0.0,
+                                    is_success: bool = False,
+                                    failure_type: str = "unknown",
+                                    summarized_skill_prompt: str = "",
+                                    retrieved_memories: Optional[List[str]] = None,
+                                    memory_actions: Optional[List[Dict[str, Any]]] = None,
+                                    metadata: Optional[Dict[str, Any]] = None):
+        """Record a failed problem together with the skill-tree selection that shaped it."""
+        if self.skill_hard_case_collector is None:
+            return
+        case = hard_case_from_selection(
+            problem_id=problem_id,
+            query=query,
+            selection=selection,
+            context=context,
+            prediction=prediction,
+            ground_truth=ground_truth,
+            reward=reward,
+            is_success=is_success,
+            failure_type=failure_type,
+            summarized_skill_prompt=summarized_skill_prompt,
+            retrieved_memories=retrieved_memories,
+            memory_actions=memory_actions,
+            metadata=metadata
+        )
+        self.skill_hard_case_collector.add_case(case)
+
+    def run_skill_tree_evolution(self) -> List[Dict[str, Any]]:
+        """Apply LLM-guided skill-tree updates for path buckets with enough hard cases."""
+        if self.skill_tree_designer is None or self.skill_hard_case_collector is None:
+            return []
+        min_cases = getattr(self.config, 'skill_tree_evolution_min_cases', 2)
+        results = self.skill_tree_designer.evolve_from_collector(
+            self.skill_hard_case_collector,
+            min_cases=min_cases
+        )
+        applied = sum(1 for result in results if result.get('applied'))
+        self.log(f"Skill-tree evolution processed {len(results)} bucket(s), applied {applied} change(s)")
+        return results
 
     def _wandb_log(self, payload: Dict[str, Any], step: Optional[int] = None):
         if step is None or step < 0:
@@ -1754,6 +1860,7 @@ class BaseTrainer:
             # Snapshot manager state
             'snapshot_manager': self.snapshot_manager.to_dict() if self.snapshot_manager else None,
             'designer_state': self._get_designer_state(),
+            'skill_tree_evolution_state': self._get_skill_tree_evolution_state(),
             'stage_rewards': self.stage_rewards,
             'training_logs': self.training_logs,
         }
@@ -1824,6 +1931,7 @@ class BaseTrainer:
         self.stage_rewards = checkpoint.get('stage_rewards', [])
         self.training_logs = checkpoint.get('training_logs', []) or []
         self._restore_designer_state(checkpoint)
+        self._restore_skill_tree_evolution_state(checkpoint)
         self.resume_from_checkpoint = True
         self.resume_wandb_run_id = checkpoint.get('wandb_run_id')
         self.resume_wandb_run_name = checkpoint.get('wandb_run_name')
@@ -1831,13 +1939,18 @@ class BaseTrainer:
             len(self.designer.case_collector.get_all_cases())
             if self.designer is not None else 0
         )
+        skill_tree_case_count = (
+            len(self.skill_hard_case_collector.get_all_cases())
+            if self.skill_hard_case_collector is not None else 0
+        )
 
         self.log(
             f"Checkpoint resume state: completed_outer_epoch={self.completed_outer_epoch}, "
             f"new_action_bias_active={self.new_action_bias_active}, "
             f"new_action_bias_step={self.new_action_bias_step}, "
             f"wandb_step_cursor={self.wandb_step_cursor}, "
-            f"designer_cases={designer_case_count}"
+            f"designer_cases={designer_case_count}, "
+            f"skill_tree_cases={skill_tree_case_count}"
         )
         self.log(f"Loaded checkpoint from {path}")
 
