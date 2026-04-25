@@ -71,7 +71,11 @@ Action type: NOOP only.
 INITIAL_OPERATIONS = {
     "insert": {
         "name": "insert",
+        "visibility": "shared",
+        "user_key": None,
+        "children": [],
         "description": SKILL_INSERT_DESCRIPTION,
+        "content": SKILL_INSERT_TEMPLATE,
         "instruction_template": SKILL_INSERT_TEMPLATE,
         "update_type": "insert",  # insert, update, delete, noop
         "meta_info": {
@@ -86,7 +90,11 @@ INITIAL_OPERATIONS = {
 
     "update": {
         "name": "update",
+        "visibility": "shared",
+        "user_key": None,
+        "children": [],
         "description": SKILL_UPDATE_DESCRIPTION,
+        "content": SKILL_UPDATE_TEMPLATE,
         "instruction_template": SKILL_UPDATE_TEMPLATE,
         "update_type": "update",
         "meta_info": {
@@ -101,7 +109,11 @@ INITIAL_OPERATIONS = {
 
     "delete": {
         "name": "delete",
+        "visibility": "shared",
+        "user_key": None,
+        "children": [],
         "description": SKILL_DELETE_DESCRIPTION,
+        "content": SKILL_DELETE_TEMPLATE,
         "instruction_template": SKILL_DELETE_TEMPLATE,
         "update_type": "delete",
         "meta_info": {
@@ -116,7 +128,11 @@ INITIAL_OPERATIONS = {
 
     "noop": {
         "name": "noop",
+        "visibility": "shared",
+        "user_key": None,
+        "children": [],
         "description": SKILL_NOOP_DESCRIPTION,
+        "content": SKILL_NOOP_TEMPLATE,
         "instruction_template": SKILL_NOOP_TEMPLATE,
         "update_type": "noop",
         "meta_info": {

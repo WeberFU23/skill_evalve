@@ -35,7 +35,7 @@ from rag_utils import get_embeddings, init_context_model, init_query_model
 from eval_utils import llm_judge
 from prompts.prompt_pool import LLM_JUDGE_GENERAL_PROMPT
 
-CHECKPOINT_VERSION = 4
+CHECKPOINT_VERSION = 5
 
 
 class BaseTrainer:
@@ -519,13 +519,15 @@ class BaseTrainer:
         total = episode_length if episode_length > 0 else None
         steps_processed = 0
         for session_idx, session_text in tqdm(enumerate(sessions), total=total, desc=desc):
+            skill_context = self._build_skill_context(conversation_data)
             step_log = self._process_session(
                 session_text=session_text,
                 memory_bank=memory_bank,
                 session_idx=session_idx,
                 ppo_buffer=ppo_buffer,
                 episode_length=episode_length,
-                session_embedding=session_embeddings[session_idx] if session_embeddings is not None else None
+                session_embedding=session_embeddings[session_idx] if session_embeddings is not None else None,
+                skill_context=skill_context
             )
             episode_log['steps'].append(step_log)
             steps_processed += 1
@@ -561,7 +563,8 @@ class BaseTrainer:
     def _process_session(self, session_text: str, memory_bank: MemoryBank,
                          session_idx: int, ppo_buffer: PPOBuffer,
                          episode_length: int = None,
-                         session_embedding: np.ndarray = None) -> Dict:
+                         session_embedding: np.ndarray = None,
+                         skill_context: Optional[Dict[str, Any]] = None) -> Dict:
         """
         Process one session: retrieve memories, select operation, execute
         For PPO: stores state, action, log_prob, value in buffer
@@ -597,8 +600,15 @@ class BaseTrainer:
         step_log['state_embedding'] = state_embedding
 
         # Get candidate operations
-        candidate_ops = self.operation_bank.get_candidate_operations()
+        candidate_ops, routing_meta = self.operation_bank.get_candidate_operations(
+            session_text=session_text,
+            query_embedding=session_embedding,
+            user_key=(skill_context or {}).get('user_key'),
+            args=self.args,
+            return_metadata=True
+        )
         step_log['candidate_ops'] = [op.name for op in candidate_ops]
+        step_log['routing_meta'] = routing_meta
 
         # Get operation embeddings
         op_embeddings = np.vstack([op.embedding for op in candidate_ops])
@@ -624,13 +634,16 @@ class BaseTrainer:
             # Top-K case: multiple selected operations
             selected_ops = [candidate_ops[idx] for idx in action_idx]
             selected_op_names = [op.name for op in selected_ops]
+            selected_op_keys = [op.node_path for op in selected_ops]
             self.log(f"Selected ops (top-K): {selected_op_names}")
             step_log['selected_op'] = selected_op_names  # List of names for top-K
+            step_log['selected_op_key'] = selected_op_keys
         else:
             # Single action case
             selected_ops = [candidate_ops[action_idx]]
             self.log(f"Selected op: {selected_ops[0].name}")
             step_log['selected_op'] = selected_ops[0].name  # Single name for backward compatibility
+            step_log['selected_op_key'] = selected_ops[0].node_path
 
         step_log['selected_ops'] = selected_ops  # List of Operation objects
         step_log['action_idx'] = action_idx
@@ -643,7 +656,8 @@ class BaseTrainer:
         exec_results = self.executor.execute_operation(
             operation=executor_ops,
             session_text=session_text,
-            retrieved_memories=retrieved_memories
+            retrieved_memories=retrieved_memories,
+            routing_summary=routing_meta.get('routing_summary', '')
         )
         step_log['exec_results'] = [str(r) for r in exec_results]
         step_log['parse_total'] = len(exec_results)
@@ -1154,14 +1168,14 @@ class BaseTrainer:
 
                         # Update operation statistics (in main thread)
                         for stat in op_stats:
-                            op = self.operation_bank.get_operation(stat['op_name'])
+                            op = self.operation_bank.get_operation(stat['op_key'])
                             op.update_stats(stat['reward'])
 
                 # Update EMA based on batch-level usage (after all episodes collected)
                 # Handle both single op (string) and top-K ops (list of strings)
                 op_usage_counts = {}
                 for step in batch_steps:
-                    selected_op = step.get('selected_op', 'unknown')
+                    selected_op = step.get('selected_op_key', 'unknown')
                     if isinstance(selected_op, list):
                         for op_name in selected_op:
                             op_usage_counts[op_name] = op_usage_counts.get(op_name, 0) + 1
@@ -1204,7 +1218,7 @@ class BaseTrainer:
                 # Handle both single op (string) and top-K ops (list of strings)
                 op_counts = {}
                 for step in batch_steps:
-                    selected_op = step.get('selected_op', 'unknown')
+                    selected_op = step.get('selected_op_key', 'unknown')
                     if isinstance(selected_op, list):
                         for op_name in selected_op:
                             op_counts[op_name] = op_counts.get(op_name, 0) + 1
@@ -1217,7 +1231,7 @@ class BaseTrainer:
                 new_op_names = set(self.operation_bank.new_operation_names)
                 new_op_selected = 0
                 for step in batch_steps:
-                    selected_op = step.get('selected_op')
+                    selected_op = step.get('selected_op_key')
                     if isinstance(selected_op, list):
                         new_op_selected += sum(1 for op in selected_op if op in new_op_names)
                     elif selected_op in new_op_names:
@@ -1670,17 +1684,21 @@ class BaseTrainer:
         op_stats = []
         for step in episode_log['steps']:
             selected_op = step['selected_op']
+            selected_op_key = step.get('selected_op_key')
             if isinstance(selected_op, list):
                 # Top-K case: record stats for each selected operation
-                for op_name in selected_op:
+                selected_keys = selected_op_key if isinstance(selected_op_key, list) else [None] * len(selected_op)
+                for op_name, op_key in zip(selected_op, selected_keys):
                     op_stats.append({
                         'op_name': op_name,
+                        'op_key': op_key,
                         'reward': episode_log['total_reward']
                     })
             else:
                 # Single action case
                 op_stats.append({
                     'op_name': selected_op,
+                    'op_key': selected_op_key,
                     'reward': episode_log['total_reward']
                 })
 
@@ -1730,6 +1748,21 @@ class BaseTrainer:
         _prepare_sessions() to handle interactive datasets.
         """
         return self.data_processor.extract_chunks(conversation)
+
+    def _build_skill_context(self, conversation_data: Dict) -> Dict[str, str]:
+        conversation_data = conversation_data or {}
+        user_key = (
+            conversation_data.get('user_key')
+            or conversation_data.get('user_id')
+            or conversation_data.get('speaker_id')
+            or conversation_data.get('persona_id')
+            or conversation_data.get('conversation_id')
+            or conversation_data.get('sample_id')
+            or "default_user"
+        )
+        return {
+            'user_key': str(user_key)
+        }
 
     def save_checkpoint(self, epoch: int):
         """Save model checkpoint (PPO version)"""
@@ -1968,13 +2001,17 @@ class AlfworldPairTrainer(BaseTrainer):
             total=len(chunks),
             desc="ALFWorld batch A",
         ):
+            skill_context = {
+                'user_key': 'alfworld_agent'
+            }
             step_log = self._process_session(
                 session_text=session_text,
                 memory_bank=memory_bank,
                 session_idx=session_idx,
                 ppo_buffer=ppo_buffer,
                 episode_length=episode_length,
-                session_embedding=session_embeddings[session_idx] if session_embeddings is not None else None
+                session_embedding=session_embeddings[session_idx] if session_embeddings is not None else None,
+                skill_context=skill_context
             )
             step_logs.append(step_log)
         return step_logs
@@ -2173,11 +2210,13 @@ class AlfworldPairTrainer(BaseTrainer):
         op_stats = []
         for step in step_logs:
             selected_op = step.get('selected_op')
+            selected_op_key = step.get('selected_op_key')
             if isinstance(selected_op, list):
-                for op_name in selected_op:
-                    op_stats.append({'op_name': op_name, 'reward': avg_reward})
+                selected_keys = selected_op_key if isinstance(selected_op_key, list) else [None] * len(selected_op)
+                for op_name, op_key in zip(selected_op, selected_keys):
+                    op_stats.append({'op_name': op_name, 'op_key': op_key, 'reward': avg_reward})
             else:
-                op_stats.append({'op_name': selected_op, 'reward': avg_reward})
+                op_stats.append({'op_name': selected_op, 'op_key': selected_op_key, 'reward': avg_reward})
 
         return {
             'episode_log': episode_log,

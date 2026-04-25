@@ -41,7 +41,8 @@ class Executor:
         self.logger = logging.getLogger('AgenticMemory')
 
     def _build_executor_prompt(self, operations: List, session_text: str,
-                               retrieved_memories: List[str]) -> str:
+                               retrieved_memories: List[str],
+                               routing_summary: str = "") -> str:
         """Build the executor prompt from selected memory management skills."""
         if len(retrieved_memories) > 0:
             mem_text = "\n".join([f"{i}. {mem}" for i, mem in enumerate(retrieved_memories)])
@@ -73,6 +74,9 @@ class Executor:
             skill_blocks.append("\n".join(lines))
 
         skills_text = "\n\n".join(skill_blocks) if skill_blocks else "(No skills provided)"
+        routed_summary_text = routing_summary.strip() if isinstance(routing_summary, str) else ""
+        if not routed_summary_text:
+            routed_summary_text = "(No routed skill summary)"
 
         return (
             "You are a memory management executor. Apply the selected skills to the input text\n"
@@ -81,6 +85,8 @@ class Executor:
             f"{session_text}\n\n"
             "Retrieved Memories (0-based index):\n"
             f"{mem_text}\n\n"
+            "Route Summary:\n"
+            f"{routed_summary_text}\n\n"
             "Selected Skills:\n"
             f"{skills_text}\n\n"
             "Guidelines:\n"
@@ -105,7 +111,8 @@ class Executor:
         )
 
     def execute_operation(self, operation: Union[object, List[object]], session_text: str,
-                          retrieved_memories: List[str]) -> List[ExecutionResult]:
+                          retrieved_memories: List[str],
+                          routing_summary: str = "") -> List[ExecutionResult]:
         """
         Execute a memory operation
         Args:
@@ -134,7 +141,9 @@ class Executor:
             if not sub_text.strip():
                 continue
             # Build executor prompt from selected skills
-            instruction = self._build_executor_prompt(operations, sub_text, retrieved_memories)
+            instruction = self._build_executor_prompt(
+                operations, sub_text, retrieved_memories, routing_summary=routing_summary
+            )
 
             # Call LLM API
             try:
