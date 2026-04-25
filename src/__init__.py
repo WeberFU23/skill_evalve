@@ -4,6 +4,7 @@ Agentic Memory System with Co-evolving Memory and Operation Banks
 
 from .memory_bank import MemoryBank
 from .operation_bank import OperationBank
+from .skill_tree import SkillTree, SkillTreeSelector, SkillNode
 from .controller import PPOController
 from .executor import Executor
 from .designer import Designer
@@ -16,6 +17,9 @@ from . import eval
 __all__ = [
     'MemoryBank',
     'OperationBank',
+    'SkillTree',
+    'SkillTreeSelector',
+    'SkillNode',
     'PPOController',
     'Executor',
     'Designer',
