@@ -87,6 +87,9 @@ class AgenticMemoryConfig:
         self.skill_tree_dir = "./skills"
         self.skill_tree_top_k = 3
         self.skill_tree_max_depth = 4
+        self.skill_scope_ids = None
+        self.user_id = None
+        self.user_key = None
         self.enable_skill_tree_evolution = False
         self.skill_tree_failure_pool_size = 1000
         self.skill_tree_evolution_min_cases = 2
@@ -343,6 +346,12 @@ def get_agentic_memory_args():
                         help='Top-k visible children considered at each skill-tree routing step')
     parser.add_argument('--skill-tree-max-depth', type=int, default=4,
                         help='Maximum depth for skill-tree routing')
+    parser.add_argument('--skill-scope-ids', type=str, nargs='*', default=None,
+                        help='Optional scope IDs allowed to read private skill-tree nodes')
+    parser.add_argument('--user-id', type=str, default=None,
+                        help='Optional user ID used as a skill-tree visibility scope')
+    parser.add_argument('--user-key', type=str, default=None,
+                        help='Optional user key used as a skill-tree visibility scope')
     parser.add_argument('--enable-skill-tree-evolution', action='store_true',
                         help='Enable path-grounded skill-tree hard-case collection/evolution')
     parser.add_argument('--skill-tree-failure-pool-size', type=int, default=1000,

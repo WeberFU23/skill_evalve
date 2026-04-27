@@ -97,6 +97,15 @@ class SkillNode:
         """Full node text suitable for prompt assembly."""
         return self.body.strip()
 
+    @property
+    def update_type(self) -> str:
+        """Executor action type declared by this skill node, if any."""
+        return _extract_update_type(self.metadata, self.body)
+
+    def is_executable(self) -> bool:
+        """Whether this node can be handed to the memory executor."""
+        return self.update_type in {"insert", "update", "delete", "noop"}
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "id": self.id,
@@ -117,6 +126,7 @@ class RoutingStep:
     selected_path: Optional[str]
     log_prob: float
     value: float
+    action_embeddings: Optional[np.ndarray] = None
 
 
 @dataclass
@@ -322,6 +332,7 @@ class SkillTreeSelector:
                     selected_path=None,
                     log_prob=log_prob,
                     value=value,
+                    action_embeddings=np.asarray(action_embeddings),
                 ))
                 stopped = True
                 break
@@ -334,6 +345,7 @@ class SkillTreeSelector:
                 selected_path=selected_child.path,
                 log_prob=log_prob,
                 value=value,
+                action_embeddings=np.asarray(action_embeddings),
             ))
             current = selected_child
             path_nodes.append(current)
@@ -436,12 +448,17 @@ class SkillTreeSelector:
         state_tensor = torch.tensor(state_embedding, dtype=torch.float32).to(self.device)
         action_tensor = torch.tensor(action_embeddings, dtype=torch.float32).to(self.device)
         with torch.no_grad():
-            action, log_prob, value = self.controller(
-                state_tensor, action_tensor, deterministic=deterministic
-            )
-        if isinstance(action, list):
-            action = action[0]
-        return int(action), float(log_prob), float(value)
+            state_h = self.controller.encode_state(state_tensor.unsqueeze(0))
+            op_h = self.controller.encode_ops(action_tensor.unsqueeze(0))
+            logits = self.controller.get_action_logits(state_h, op_h)[0]
+            value = self.controller.get_value(state_h)[0]
+            dist = torch.distributions.Categorical(logits=logits)
+            if deterministic:
+                action = torch.argmax(logits)
+            else:
+                action = dist.sample()
+            log_prob = dist.log_prob(action)
+        return int(action.item()), float(log_prob.item()), float(value.item())
 
     def _assemble_selected_nodes(self, path_nodes: List[SkillNode],
                                  terminal_node: SkillNode,
@@ -507,6 +524,25 @@ def _extract_section(body: str, heading: str) -> str:
     pattern = rf"^##\s+{re.escape(heading)}\s*\n(.*?)(?=^##\s+|\Z)"
     match = re.search(pattern, body, flags=re.MULTILINE | re.DOTALL)
     return match.group(1).strip() if match else ""
+
+
+def _extract_update_type(metadata: Dict[str, Any], body: str) -> str:
+    value = metadata.get("update_type") or metadata.get("action_type")
+    if value is not None:
+        value = str(value).strip().lower()
+        if value in {"insert", "update", "delete", "noop"}:
+            return value
+
+    output_action = _extract_section(body, "Output Action")
+    search_text = output_action if output_action else body
+    match = re.search(
+        r"action\s+type\s*:\s*(insert|update|delete|noop)\b",
+        search_text,
+        flags=re.IGNORECASE,
+    )
+    if match:
+        return match.group(1).lower()
+    return ""
 
 
 def _normalize(vec: np.ndarray) -> np.ndarray:

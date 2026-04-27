@@ -18,7 +18,6 @@ from src.trainer import BaseTrainer, get_trainer
 from src.executor import ExecutionResult
 from src.memory_bank import MemoryBank
 from src.data_processing.alfworld import chunk_trajectories_by_tokens
-from src.alfworld_env_runner import run_alfworld_episode
 from rag_utils import get_embeddings
 from eval_utils import llm_judge
 from llm_utils import get_llm_response
@@ -133,17 +132,25 @@ def _extract_memory_actions_step(trainer: BaseTrainer,
         memory_embeddings=retrieved_memory_embeddings
     )
 
-    candidate_ops = trainer.operation_bank.get_candidate_operations()
-    op_embeddings = np.vstack([op.embedding for op in candidate_ops])
-
-    state_tensor = torch.tensor(state_embedding, dtype=torch.float32).to(trainer.device)
-    op_tensor = torch.tensor(op_embeddings, dtype=torch.float32).to(trainer.device)
-
-    action_idx, _, _ = trainer.controller(state_tensor, op_tensor, deterministic=True)
-    if isinstance(action_idx, list):
-        selected_ops = [candidate_ops[idx] for idx in action_idx]
+    skill_tree_selector = getattr(trainer, "skill_tree_selector", None)
+    if skill_tree_selector is not None and hasattr(trainer, "_select_skill_tree_operations"):
+        _, selected_ops = trainer._select_skill_tree_operations(
+            session_text=session_text,
+            state_embedding=state_embedding,
+            deterministic=True,
+        )
     else:
-        selected_ops = [candidate_ops[action_idx]]
+        candidate_ops = trainer.operation_bank.get_candidate_operations()
+        op_embeddings = np.vstack([op.embedding for op in candidate_ops])
+
+        state_tensor = torch.tensor(state_embedding, dtype=torch.float32).to(trainer.device)
+        op_tensor = torch.tensor(op_embeddings, dtype=torch.float32).to(trainer.device)
+
+        action_idx, _, _ = trainer.controller(state_tensor, op_tensor, deterministic=True)
+        if isinstance(action_idx, list):
+            selected_ops = [candidate_ops[idx] for idx in action_idx]
+        else:
+            selected_ops = [candidate_ops[action_idx]]
 
     executor_ops = [
         op for op in selected_ops
@@ -953,6 +960,8 @@ def infer_alfworld_memories(trainer: BaseTrainer, train_data, test_data, args):
 
     results = []
     ctx = mp.get_context("spawn")
+    from src.alfworld_env_runner import run_alfworld_episode
+
     with ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as executor:
         futures = {
             executor.submit(

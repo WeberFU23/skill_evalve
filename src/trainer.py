@@ -16,13 +16,12 @@ from tqdm import tqdm
 from typing import List, Dict, Optional, Tuple, Any
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 import sys
-import wandb
 import re
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.controller import PPOController, StateEncoder, OpEncoder, PPOBuffer
 from src.memory_bank import MemoryBank
-from src.operation_bank import OperationBank
+from src.operation_bank import Operation, OperationBank
 from src.executor import Executor
 from src.designer import Designer, DesignerCase, EvolutionSnapshotManager
 from src.skill_tree import SkillTree, SkillTreeSelector
@@ -42,6 +41,15 @@ from eval_utils import llm_judge
 from prompts.prompt_pool import LLM_JUDGE_GENERAL_PROMPT
 
 CHECKPOINT_VERSION = 4
+_WANDB = None
+
+
+def _get_wandb():
+    global _WANDB
+    if _WANDB is None:
+        import wandb as wandb_module
+        _WANDB = wandb_module
+    return _WANDB
 
 
 class BaseTrainer:
@@ -571,7 +579,95 @@ class BaseTrainer:
         self.log(f"Skill-tree evolution processed {len(results)} bucket(s), applied {applied} change(s)")
         return results
 
+    def _get_skill_scope_ids(self) -> List[str]:
+        """Collect optional scope IDs used for skill-tree visibility filtering."""
+        scope_ids = []
+
+        def add_value(value):
+            if value is None:
+                return
+            if isinstance(value, (list, tuple, set)):
+                for item in value:
+                    add_value(item)
+                return
+            for part in str(value).split(","):
+                part = part.strip()
+                if part:
+                    scope_ids.append(part)
+
+        for source in (self.args, self.config):
+            for name in ("skill_scope_ids", "scope_ids", "scope_id", "user_id", "user_key"):
+                add_value(getattr(source, name, None))
+
+        seen = set()
+        deduped = []
+        for scope in scope_ids:
+            if scope not in seen:
+                seen.add(scope)
+                deduped.append(scope)
+        return deduped
+
+    def _skill_node_to_operation(self, node) -> Operation:
+        """Adapt a markdown skill-tree node to the executor's Operation interface."""
+        update_type = node.update_type or "noop"
+        op = Operation(
+            name=f"skill_tree::{node.path}",
+            description=node.description_text(),
+            instruction_template=node.instruction_text(),
+            update_type=update_type,
+            meta_info={
+                "usage_count": 0,
+                "avg_reward": 0.0,
+                "recent_rewards": [],
+                "recent_usage_ema": 0.0,
+                "created_at": "skill_tree",
+                "last_modified": "skill_tree",
+                "skill_tree_path": node.path,
+            }
+        )
+        if node.embedding is not None:
+            op.embedding = node.embedding
+        return op
+
+    def _operations_from_skill_selection(self, selection) -> List[Operation]:
+        """Return executable skill nodes selected by the tree router."""
+        selected_ops = []
+        seen = set()
+        for node in getattr(selection, "selected_nodes", []) or []:
+            if not node.is_executable() or node.path in seen:
+                continue
+            seen.add(node.path)
+            selected_ops.append(self._skill_node_to_operation(node))
+
+        # Category nodes often declare NOOP while children carry executable
+        # behavior. Keep NOOP only when it is the sole available action.
+        if any(op.update_type != "noop" for op in selected_ops):
+            selected_ops = [op for op in selected_ops if op.update_type != "noop"]
+
+        if not selected_ops:
+            try:
+                selected_ops = [self.operation_bank.get_operation("noop")]
+            except KeyError:
+                selected_ops = []
+        return selected_ops
+
+    def _select_skill_tree_operations(self, session_text: str,
+                                      state_embedding: np.ndarray,
+                                      deterministic: bool = False):
+        """Route through the skill tree and return executor operations."""
+        if self.skill_tree_selector is None:
+            return None, []
+
+        selection = self.skill_tree_selector.select(
+            query=session_text,
+            state_embedding=state_embedding,
+            scope_ids=self._get_skill_scope_ids(),
+            deterministic=deterministic,
+        )
+        return selection, self._operations_from_skill_selection(selection)
+
     def _wandb_log(self, payload: Dict[str, Any], step: Optional[int] = None):
+        wandb = _get_wandb()
         if step is None or step < 0:
             wandb.log(payload)
         else:
@@ -702,41 +798,99 @@ class BaseTrainer:
         )
         step_log['state_embedding'] = state_embedding
 
-        # Get candidate operations
-        candidate_ops = self.operation_bank.get_candidate_operations()
-        step_log['candidate_ops'] = [op.name for op in candidate_ops]
+        route_transition_records = []
+        skill_tree_selection = None
+        op_embeddings = None
+        new_op_mask = None
+        action_idx = None
+        log_prob = 0.0
+        value = 0.0
 
-        # Get operation embeddings
-        op_embeddings = np.vstack([op.embedding for op in candidate_ops])
-        new_op_indices = self.operation_bank.get_new_action_indices(candidate_ops)
-        if len(new_op_indices) > 0:
-            new_op_mask = np.zeros(len(candidate_ops), dtype=np.float32)
-            new_op_mask[new_op_indices] = 1.0
-        else:
-            new_op_mask = None
-
-        # Controller selects operation(s) (samples from policy)
-        # Use no_grad during rollout to avoid unnecessary graph construction
-        state_tensor = torch.tensor(state_embedding, dtype=torch.float32).to(self.device)
-        op_tensor = torch.tensor(op_embeddings, dtype=torch.float32).to(self.device)
-
-        with torch.no_grad():
-            action_idx, log_prob, value = self.controller(
-                state_tensor, op_tensor, deterministic=False, new_op_mask=new_op_mask
+        if self.skill_tree_selector is not None:
+            skill_tree_selection, selected_ops = self._select_skill_tree_operations(
+                session_text=session_text,
+                state_embedding=state_embedding,
+                deterministic=False,
             )
-
-        # Handle both single action (K=1) and top-K actions
-        if isinstance(action_idx, list):
-            # Top-K case: multiple selected operations
-            selected_ops = [candidate_ops[idx] for idx in action_idx]
             selected_op_names = [op.name for op in selected_ops]
-            self.log(f"Selected ops (top-K): {selected_op_names}")
-            step_log['selected_op'] = selected_op_names  # List of names for top-K
+            self.log(f"Selected skill-tree ops: {selected_op_names}")
+            step_log['candidate_ops'] = [
+                list(step.candidate_paths)
+                for step in getattr(skill_tree_selection, "routing_steps", []) or []
+            ]
+            step_log['selected_op'] = (
+                selected_op_names if len(selected_op_names) != 1 else selected_op_names[0]
+            )
+            step_log['selected_skill_paths'] = list(getattr(skill_tree_selection, "selected_paths", []) or [])
+            terminal = getattr(skill_tree_selection, "terminal_node", None)
+            step_log['skill_tree_terminal'] = getattr(terminal, "path", None)
+            step_log['skill_tree_routing'] = []
+
+            for step in getattr(skill_tree_selection, "routing_steps", []) or []:
+                if step.selected_path is None:
+                    step_action_idx = 0
+                else:
+                    try:
+                        step_action_idx = list(step.candidate_paths).index(step.selected_path)
+                    except ValueError:
+                        step_action_idx = 0
+
+                if step.action_embeddings is not None:
+                    route_transition_records.append({
+                        "op_embs": np.asarray(step.action_embeddings, dtype=np.float32),
+                        "action": step_action_idx,
+                        "log_prob": step.log_prob,
+                        "value": step.value,
+                    })
+
+                step_log['skill_tree_routing'].append({
+                    "current_path": step.current_path,
+                    "candidate_paths": list(step.candidate_paths),
+                    "selected_path": step.selected_path,
+                    "action": step.action,
+                    "action_idx": step_action_idx,
+                })
+
+            if route_transition_records:
+                last_route = route_transition_records[-1]
+                op_embeddings = last_route["op_embs"]
+                action_idx = last_route["action"]
+                log_prob = last_route["log_prob"]
+                value = last_route["value"]
         else:
-            # Single action case
-            selected_ops = [candidate_ops[action_idx]]
-            self.log(f"Selected op: {selected_ops[0].name}")
-            step_log['selected_op'] = selected_ops[0].name  # Single name for backward compatibility
+            # Get candidate operations
+            candidate_ops = self.operation_bank.get_candidate_operations()
+            step_log['candidate_ops'] = [op.name for op in candidate_ops]
+
+            # Get operation embeddings
+            op_embeddings = np.vstack([op.embedding for op in candidate_ops])
+            new_op_indices = self.operation_bank.get_new_action_indices(candidate_ops)
+            if len(new_op_indices) > 0:
+                new_op_mask = np.zeros(len(candidate_ops), dtype=np.float32)
+                new_op_mask[new_op_indices] = 1.0
+
+            # Controller selects operation(s) (samples from policy)
+            # Use no_grad during rollout to avoid unnecessary graph construction
+            state_tensor = torch.tensor(state_embedding, dtype=torch.float32).to(self.device)
+            op_tensor = torch.tensor(op_embeddings, dtype=torch.float32).to(self.device)
+
+            with torch.no_grad():
+                action_idx, log_prob, value = self.controller(
+                    state_tensor, op_tensor, deterministic=False, new_op_mask=new_op_mask
+                )
+
+            # Handle both single action (K=1) and top-K actions
+            if isinstance(action_idx, list):
+                # Top-K case: multiple selected operations
+                selected_ops = [candidate_ops[idx] for idx in action_idx]
+                selected_op_names = [op.name for op in selected_ops]
+                self.log(f"Selected ops (top-K): {selected_op_names}")
+                step_log['selected_op'] = selected_op_names  # List of names for top-K
+            else:
+                # Single action case
+                selected_ops = [candidate_ops[action_idx]]
+                self.log(f"Selected op: {selected_ops[0].name}")
+                step_log['selected_op'] = selected_ops[0].name  # Single name for backward compatibility
 
         step_log['selected_ops'] = selected_ops  # List of Operation objects
         step_log['action_idx'] = action_idx
@@ -763,16 +917,29 @@ class BaseTrainer:
         # Immediate reward = process reward
         immediate_reward = process_reward
 
-        # Store transition in PPO buffer
-        ppo_buffer.push(
-            state_emb=state_embedding,
-            op_embs=op_embeddings,
-            action=action_idx,  # int or List[int]
-            log_prob=log_prob,
-            value=value,
-            reward=immediate_reward,
-            new_op_mask=new_op_mask
-        )
+        # Store transition(s) in PPO buffer.
+        if route_transition_records:
+            routed_reward = immediate_reward / max(len(route_transition_records), 1)
+            for record in route_transition_records:
+                ppo_buffer.push(
+                    state_emb=state_embedding,
+                    op_embs=record["op_embs"],
+                    action=record["action"],
+                    log_prob=record["log_prob"],
+                    value=record["value"],
+                    reward=routed_reward,
+                    new_op_mask=None
+                )
+        elif op_embeddings is not None and action_idx is not None:
+            ppo_buffer.push(
+                state_emb=state_embedding,
+                op_embs=op_embeddings,
+                action=action_idx,  # int or List[int]
+                log_prob=log_prob,
+                value=value,
+                reward=immediate_reward,
+                new_op_mask=new_op_mask
+            )
 
         # Apply all results to memory bank
         operation_names = []
@@ -1145,6 +1312,7 @@ class BaseTrainer:
             return
 
         # Initialize wandb
+        wandb = _get_wandb()
         if mp.current_process().name == "MainProcess":
             wandb_key = getattr(self.args, 'wandb_key', None)
             if wandb_key:
@@ -1260,7 +1428,10 @@ class BaseTrainer:
 
                         # Update operation statistics (in main thread)
                         for stat in op_stats:
-                            op = self.operation_bank.get_operation(stat['op_name'])
+                            try:
+                                op = self.operation_bank.get_operation(stat['op_name'])
+                            except KeyError:
+                                continue
                             op.update_stats(stat['reward'])
 
                 # Update EMA based on batch-level usage (after all episodes collected)
@@ -1653,6 +1824,7 @@ class BaseTrainer:
         }, step=self.wandb_step_cursor)
 
         # Finish wandb run
+        wandb = _get_wandb()
         wandb.finish()
 
         self.log("\n" + "=" * 80)
@@ -1865,6 +2037,7 @@ class BaseTrainer:
             'training_logs': self.training_logs,
         }
 
+        wandb = _get_wandb()
         run = getattr(wandb, 'run', None)
         if run is not None:
             checkpoint['wandb_run_id'] = getattr(run, 'id', None)
