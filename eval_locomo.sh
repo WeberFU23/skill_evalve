@@ -1,5 +1,12 @@
 #!/bin/bash
-export CUDA_VISIBLE_DEVICES=0
+set -euo pipefail
+
+: "${DEEPSEEK_API_KEY:?Set DEEPSEEK_API_KEY before running this script}"
+
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
+export WANDB_MODE="${WANDB_MODE:-offline}"
+export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
 
 # Optional:
 # export ZHIPU_API_KEY_1="your_first_key"
@@ -17,12 +24,12 @@ python main.py \
     --load-checkpoint "./checkpoints/locomo_with_designer_lite/locomo-train-lite_epoch_final.pt" \
     --dataset locomo \
     --data-file "./data/locomo10.json" \
-    --model "" \
-    --designer-model "" \
-    --llm-judge-model "" \
+    --model "deepseek-chat" \
+    --designer-model "deepseek-chat" \
+    --llm-judge-model "deepseek-chat" \
     --api \
-    --api-base "" \
-    --api-key "" \
+    --api-base "https://api.deepseek.com" \
+    --api-key "$DEEPSEEK_API_KEY" \
     --retriever contriever \
     --state-encoder sentence-transformers/all-MiniLM-L6-v2 \
     --op-encoder sentence-transformers/all-MiniLM-L6-v2 \
