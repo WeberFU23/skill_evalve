@@ -41,12 +41,21 @@ class Executor:
         self.logger = logging.getLogger('AgenticMemory')
 
     def _build_executor_prompt(self, operations: List, session_text: str,
-                               retrieved_memories: List[str]) -> str:
+                               retrieved_memories: List[str],
+                               negative_memories: List[str] = None) -> str:
         """Build the executor prompt from selected memory management skills."""
         if len(retrieved_memories) > 0:
             mem_text = "\n".join([f"{i}. {mem}" for i, mem in enumerate(retrieved_memories)])
         else:
             mem_text = "(No existing memories retrieved)"
+
+        negative_memories = negative_memories or []
+        if len(negative_memories) > 0:
+            neg_text = "\n\n".join(
+                f"{i}. {memory}" for i, memory in enumerate(negative_memories)
+            )
+        else:
+            neg_text = "(No relevant negative memories retrieved)"
 
         skill_blocks = []
         seen = set()
@@ -81,11 +90,15 @@ class Executor:
             f"{session_text}\n\n"
             "Retrieved Memories (0-based index):\n"
             f"{mem_text}\n\n"
+            "Relevant Negative Memories:\n"
+            f"{neg_text}\n\n"
             "Selected Skills:\n"
             f"{skills_text}\n\n"
             "Guidelines:\n"
             "- Apply any skill as needed; a skill may be used multiple times.\n"
             "- Read the input text chunk carefully line by line and apply any skill as needed.\n"
+            "- Treat negative memories as prior mistake/correction lessons, not as hidden reasoning.\n"
+            "- Use relevant negative memories to avoid repeating known errors when deciding memory actions.\n"
             "- Only use action types supported by the selected skills.\n"
             "- MEMORY_INDEX is 0-based and must reference the retrieved memories list.\n"
             "- Output only action blocks in the format below.\n"
@@ -105,7 +118,8 @@ class Executor:
         )
 
     def execute_operation(self, operation: Union[object, List[object]], session_text: str,
-                          retrieved_memories: List[str]) -> List[ExecutionResult]:
+                          retrieved_memories: List[str],
+                          negative_memories: List[str] = None) -> List[ExecutionResult]:
         """
         Execute a memory operation
         Args:
@@ -134,7 +148,12 @@ class Executor:
             if not sub_text.strip():
                 continue
             # Build executor prompt from selected skills
-            instruction = self._build_executor_prompt(operations, sub_text, retrieved_memories)
+            instruction = self._build_executor_prompt(
+                operations,
+                sub_text,
+                retrieved_memories,
+                negative_memories=negative_memories
+            )
 
             # Call LLM API
             try:

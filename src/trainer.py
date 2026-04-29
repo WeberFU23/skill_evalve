@@ -24,6 +24,7 @@ from src.memory_bank import MemoryBank
 from src.operation_bank import Operation, OperationBank
 from src.executor import Executor
 from src.designer import Designer, DesignerCase, EvolutionSnapshotManager
+from src.negative_memory import NegativeMemoryStore
 from src.skill_tree import SkillTree, SkillTreeSelector
 from src.skill_tree_evolution import (
     SkillHardCaseCollector,
@@ -140,6 +141,18 @@ class BaseTrainer:
 
         # Setup logging (before Designer so it can use the logger)
         self.logger = self._setup_logging()
+
+        self.negative_memory_store = None
+        if getattr(config, 'enable_negative_memory', False):
+            self.negative_memory_store = NegativeMemoryStore(
+                root_dir=getattr(config, 'negative_memory_dir', './negative_memories'),
+                encoder=self.state_encoder,
+                max_chars_per_memory=getattr(config, 'negative_memory_max_chars', 1200)
+            )
+            self.log(
+                f"Loaded negative memory store with "
+                f"{len(self.negative_memory_store.entries)} entries"
+            )
 
         self.skill_tree = None
         self.skill_tree_selector = None
@@ -607,6 +620,35 @@ class BaseTrainer:
                 deduped.append(scope)
         return deduped
 
+    def retrieve_negative_memories(self, query: str,
+                                   top_k: Optional[int] = None) -> List[str]:
+        """Retrieve markdown negative memories relevant to the current query."""
+        if self.negative_memory_store is None:
+            return []
+        if top_k is None:
+            top_k = getattr(self.config, 'negative_memory_top_k', 3)
+        return self.negative_memory_store.retrieve(
+            query=query,
+            top_k=top_k,
+            scope_ids=self._get_skill_scope_ids()
+        )
+
+    def add_negative_memory_context_to_prompt(self, prompt: str, query: str) -> str:
+        """Prepend relevant negative memories to an answer/evaluation prompt."""
+        negative_memories = self.retrieve_negative_memories(query)
+        if not negative_memories:
+            return prompt
+        negative_context = "\n\n".join(
+            f"{idx + 1}. {memory}" for idx, memory in enumerate(negative_memories)
+        )
+        return (
+            "Relevant negative memories from prior mistakes or corrections:\n"
+            f"{negative_context}\n\n"
+            "Use these as guardrails to avoid repeating known errors. "
+            "Do not expose hidden reasoning; answer directly.\n\n"
+            f"{prompt}"
+        )
+
     def _skill_node_to_operation(self, node) -> Operation:
         """Adapt a markdown skill-tree node to the executor's Operation interface."""
         update_type = node.update_type or "noop"
@@ -897,13 +939,18 @@ class BaseTrainer:
         step_log['log_prob'] = log_prob
         step_log['value'] = value
 
+        negative_memories = self.retrieve_negative_memories(session_text)
+        if negative_memories:
+            step_log['negative_memories'] = negative_memories
+
         # Execute operation(s) - optionally prepend fixed initial operations
         executor_ops = selected_ops
         # Executor handles the logic for single vs multiple operations internally
         exec_results = self.executor.execute_operation(
             operation=executor_ops,
             session_text=session_text,
-            retrieved_memories=retrieved_memories
+            retrieved_memories=retrieved_memories,
+            negative_memories=negative_memories
         )
         step_log['exec_results'] = [str(r) for r in exec_results]
         step_log['parse_total'] = len(exec_results)
@@ -1122,6 +1169,7 @@ class BaseTrainer:
 
             # Build prompt using evaluator
             prompt = self.evaluator.build_prompt(question, retrieved_mems, qa)
+            prompt = self.add_negative_memory_context_to_prompt(prompt, question)
             task_args.append((qa_idx, prompt, eval_args))
 
         # Call LLM in parallel

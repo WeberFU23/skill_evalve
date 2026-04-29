@@ -159,10 +159,15 @@ def _extract_memory_actions_step(trainer: BaseTrainer,
     ]
     # print([i.instruction_template for i in executor_ops])
     exec_impl = executor if executor is not None else trainer.executor
+    negative_retriever = getattr(trainer, "retrieve_negative_memories", None)
+    negative_memories = (
+        negative_retriever(session_text) if callable(negative_retriever) else []
+    )
     exec_result = exec_impl.execute_operation(
         operation=executor_ops,
         session_text=session_text,
-        retrieved_memories=retrieved_memories
+        retrieved_memories=retrieved_memories,
+        negative_memories=negative_memories
     )
 
     operation_names = []
@@ -567,6 +572,9 @@ def evaluate_text_dataset_queries(trainer: BaseTrainer,
             # print(retrieved_mems)
             # print(top_k_eval, len(retrieved_mems))
             prompt = trainer.evaluator.build_prompt(question, retrieved_mems, qa)
+            add_negative_context = getattr(trainer, "add_negative_memory_context_to_prompt", None)
+            if callable(add_negative_context):
+                prompt = add_negative_context(prompt, question)
             task_args.append((next_qid, prompt, eval_args))
             meta_by_qid[next_qid] = {
                 "qa": qa,
