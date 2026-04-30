@@ -8,6 +8,7 @@ lesson instead.
 """
 import os
 import re
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional
@@ -97,23 +98,25 @@ class NegativeMemoryStore:
         self.root_dir = os.path.abspath(root_dir)
         self.encoder = encoder
         self.max_chars_per_memory = max_chars_per_memory
+        self._lock = threading.RLock()
         self.entries: List[NegativeMemoryEntry] = []
         self.load()
 
     def load(self):
-        self.entries = []
-        if not os.path.isdir(self.root_dir):
-            return
-        for dirpath, _, filenames in os.walk(self.root_dir):
-            for filename in sorted(filenames):
-                if not filename.endswith(".md"):
-                    continue
-                file_path = os.path.join(dirpath, filename)
-                entry = self._load_file(file_path)
-                if entry is not None:
-                    self.entries.append(entry)
-        if self.encoder is not None and self.entries:
-            self.recompute_embeddings()
+        with self._lock:
+            self.entries = []
+            if not os.path.isdir(self.root_dir):
+                return
+            for dirpath, _, filenames in os.walk(self.root_dir):
+                for filename in sorted(filenames):
+                    if not filename.endswith(".md"):
+                        continue
+                    file_path = os.path.join(dirpath, filename)
+                    entry = self._load_file(file_path)
+                    if entry is not None:
+                        self.entries.append(entry)
+            if self.encoder is not None and self.entries:
+                self.recompute_embeddings()
 
     def _load_file(self, file_path: str) -> Optional[NegativeMemoryEntry]:
         with open(file_path, "r", encoding="utf-8") as f:
@@ -134,30 +137,45 @@ class NegativeMemoryStore:
         )
 
     def recompute_embeddings(self):
-        texts = [entry.retrieval_text() for entry in self.entries]
-        embeddings = _encode_texts(self.encoder, texts)
-        for entry, embedding in zip(self.entries, embeddings):
-            entry.embedding = embedding
+        with self._lock:
+            texts = [entry.retrieval_text() for entry in self.entries]
+            embeddings = _encode_texts(self.encoder, texts)
+            for entry, embedding in zip(self.entries, embeddings):
+                entry.embedding = embedding
 
     def retrieve(self, query: str, top_k: int = 3,
                  scope_ids: Optional[Iterable[str]] = None) -> List[str]:
         if top_k is None or int(top_k) <= 0:
             return []
-        visible = [entry for entry in self.entries if entry.is_visible(scope_ids)]
-        if not visible:
-            return []
+        with self._lock:
+            visible = [entry for entry in self.entries if entry.is_visible(scope_ids)]
+            if not visible:
+                return []
 
-        actual_k = min(int(top_k), len(visible))
-        if self.encoder is not None:
-            for entry in visible:
-                if entry.embedding is None:
-                    entry.embedding = _encode_texts(self.encoder, [entry.retrieval_text()])[0]
-            query_embedding = _encode_texts(self.encoder, [query])[0]
-            ranked = _rank_by_embedding(query_embedding, visible)
-        else:
-            ranked = _rank_by_keyword(query, visible)
+            actual_k = min(int(top_k), len(visible))
+            if self.encoder is not None:
+                for entry in visible:
+                    if entry.embedding is None:
+                        entry.embedding = _encode_texts(self.encoder, [entry.retrieval_text()])[0]
+                query_embedding = _encode_texts(self.encoder, [query])[0]
+                ranked = _rank_by_embedding(query_embedding, visible)
+            else:
+                ranked = _rank_by_keyword(query, visible)
 
-        return [entry.prompt_text(self.max_chars_per_memory) for entry in ranked[:actual_k]]
+            return [entry.prompt_text(self.max_chars_per_memory) for entry in ranked[:actual_k]]
+
+    def has_entry_for(self, problem: str, correction: str) -> bool:
+        """Return True if an equivalent problem/correction pair is already stored."""
+        target = _dedupe_key(problem, correction)
+        with self._lock:
+            for entry in self.entries:
+                stored = _dedupe_key(
+                    _extract_section(entry.body, "Problem"),
+                    _extract_section(entry.body, "Correction"),
+                )
+                if stored == target:
+                    return True
+        return False
 
     def write_entry(self, problem: str, wrong_behavior: str, correction: str,
                     lesson: str, trigger: str = "", user_id: Optional[str] = None,
@@ -165,51 +183,52 @@ class NegativeMemoryStore:
                     title: Optional[str] = None,
                     date: Optional[str] = None) -> str:
         """Persist one negative memory markdown file and reload the store."""
-        os.makedirs(self.root_dir, exist_ok=True)
-        date = date or datetime.utcnow().strftime("%Y-%m-%d")
-        title = title or _slug_title(problem) or "negative-memory"
-        slug = _slug_title(title) or "negative-memory"
-        filename = f"{date}-{slug}.md"
-        file_path = os.path.join(self.root_dir, filename)
-        suffix = 1
-        while os.path.exists(file_path):
-            file_path = os.path.join(self.root_dir, f"{date}-{slug}-{suffix}.md")
-            suffix += 1
+        with self._lock:
+            os.makedirs(self.root_dir, exist_ok=True)
+            date = date or datetime.utcnow().strftime("%Y-%m-%d")
+            title = title or _slug_title(problem) or "negative-memory"
+            slug = _slug_title(title) or "negative-memory"
+            filename = f"{date}-{slug}.md"
+            file_path = os.path.join(self.root_dir, filename)
+            suffix = 1
+            while os.path.exists(file_path):
+                file_path = os.path.join(self.root_dir, f"{date}-{slug}-{suffix}.md")
+                suffix += 1
 
-        tag_list = ["negative"]
-        for tag in tags or []:
-            tag = str(tag).strip()
-            if tag and tag not in tag_list:
-                tag_list.append(tag)
+            tag_list = ["negative"]
+            for tag in tags or []:
+                tag = str(tag).strip()
+                if tag and tag not in tag_list:
+                    tag_list.append(tag)
 
-        visibility = "private" if user_id else "shared"
-        scope_id = user_id if user_id else "null"
-        tag_text = ", ".join(tag_list)
-        content = (
-            "---\n"
-            "type: negative\n"
-            f"title: \"{_escape_yaml(title)}\"\n"
-            f"date: {date}\n"
-            f"tags: [{tag_text}]\n"
-            f"visibility: {visibility}\n"
-            f"scope_id: {scope_id}\n"
-            "---\n\n"
-            f"# {title}\n\n"
-            "## Problem\n\n"
-            f"{problem.strip()}\n\n"
-            "## Wrong Behavior\n\n"
-            f"{wrong_behavior.strip()}\n\n"
-            "## Correction\n\n"
-            f"{correction.strip()}\n\n"
-            "## Lesson\n\n"
-            f"{lesson.strip()}\n\n"
-            "## Trigger\n\n"
-            f"{trigger.strip()}\n"
-        )
-        with open(file_path, "w", encoding="utf-8") as f:
-            f.write(content)
-        self.load()
-        return file_path
+            visibility = "private" if user_id else "shared"
+            scope_id = user_id if user_id else "null"
+            tag_text = ", ".join(tag_list)
+            content = (
+                "---\n"
+                "type: negative\n"
+                f"title: \"{_escape_yaml(title)}\"\n"
+                f"date: {date}\n"
+                f"tags: [{tag_text}]\n"
+                f"visibility: {visibility}\n"
+                f"scope_id: {scope_id}\n"
+                "---\n\n"
+                f"# {title}\n\n"
+                "## Problem\n\n"
+                f"{problem.strip()}\n\n"
+                "## Wrong Behavior\n\n"
+                f"{wrong_behavior.strip()}\n\n"
+                "## Correction\n\n"
+                f"{correction.strip()}\n\n"
+                "## Lesson\n\n"
+                f"{lesson.strip()}\n\n"
+                "## Trigger\n\n"
+                f"{trigger.strip()}\n"
+            )
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            self.load()
+            return file_path
 
 
 def _encode_texts(encoder, texts) -> np.ndarray:
@@ -249,6 +268,11 @@ def _rank_by_keyword(query: str,
 
 def _token_set(text: str) -> set:
     return set(re.findall(r"[A-Za-z0-9_]+", str(text).lower()))
+
+
+def _dedupe_key(problem: str, correction: str) -> str:
+    text = f"{problem}\n{correction}"
+    return re.sub(r"\s+", " ", str(text).strip().lower())
 
 
 def _normalize(vec: np.ndarray) -> np.ndarray:

@@ -11,6 +11,7 @@ export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
 python -B main.py \
     --disable-flash-attn \
     --memory-cache-suffix "locomo_skill_tree_eval" \
+    --overwrite \
     --eval-only \
     --inference-workers 1 \
     --inference-session-workers 1 \

@@ -39,6 +39,8 @@ python -B main.py \
     --enable-negative-memory \
     --negative-memory-dir ./negative_memories \
     --negative-memory-top-k 3 \
+    --auto-record-negative-memory \
+    --negative-memory-write-limit 20 \
     --wandb-run-name locomo-skill-tree-train \
     --save-dir ./checkpoints/locomo_skill_tree \
     --out-file ./results/locomo_skill_tree_train.json

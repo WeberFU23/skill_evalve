@@ -29,6 +29,9 @@ hidden chain-of-thought.
 - A failed case reveals a reusable error pattern rather than a one-off typo.
 - The lesson can help future answers or memory updates for the same user,
   dataset, domain, or task type.
+- During ordinary conversation-memory construction, use this skill only when
+  the current text explicitly contains correction, failure, or "do not repeat"
+  feedback. Do not infer a negative lesson from normal facts.
 
 ## How To Apply
 
@@ -45,6 +48,8 @@ hidden chain-of-thought.
   it is necessary to define the correction.
 - Do not overwrite ordinary factual memories; this skill inserts a separate
   negative lesson.
+- Do not choose this skill just because a fact is important. Use `insert` for
+  ordinary durable facts.
 
 ## Output Action
 

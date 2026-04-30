@@ -142,6 +142,9 @@ class BaseTrainer:
         # Setup logging (before Designer so it can use the logger)
         self.logger = self._setup_logging()
 
+        self._negative_memory_write_lock = threading.RLock()
+        self._negative_memory_written_keys = set()
+        self._negative_memory_write_count = 0
         self.negative_memory_store = None
         if getattr(config, 'enable_negative_memory', False):
             self.negative_memory_store = NegativeMemoryStore(
@@ -648,6 +651,135 @@ class BaseTrainer:
             "Do not expose hidden reasoning; answer directly.\n\n"
             f"{prompt}"
         )
+
+    def _should_auto_record_negative_memory(self) -> bool:
+        if self.negative_memory_store is None:
+            return False
+        if not getattr(self.config, 'auto_record_negative_memory', False):
+            return False
+        if bool(getattr(self.args, 'eval_only', False)):
+            return False
+        try:
+            return int(getattr(self.config, 'negative_memory_write_limit', 20) or 0) > 0
+        except Exception:
+            return False
+
+    def _negative_memory_failure_threshold(self) -> float:
+        threshold = getattr(self.config, 'negative_memory_f1_threshold', None)
+        if threshold is None:
+            threshold = getattr(self.config, 'designer_f1_threshold', 0.5)
+        try:
+            return float(threshold)
+        except Exception:
+            return 0.5
+
+    def _negative_memory_key(self, question: str, ground_truth: str) -> str:
+        text = f"{question}\n{ground_truth}"
+        return re.sub(r"\s+", " ", str(text).strip().lower())
+
+    def _compact_negative_memory_text(self, text: str, max_chars: int = 700) -> str:
+        text = re.sub(r"\s+", " ", str(text or "")).strip()
+        if len(text) <= max_chars:
+            return text
+        return text[:max_chars].rstrip() + " ...[truncated]"
+
+    def _maybe_record_negative_memory_failure(
+        self,
+        *,
+        question: str,
+        ground_truth: str,
+        prediction: str,
+        f1_score: float,
+        llm_judge_score: float = 0.0,
+        category=None,
+        conversation_id: Optional[str] = None,
+        qa_idx: Optional[int] = None,
+        retrieved_memories: Optional[List[str]] = None,
+    ) -> bool:
+        """Persist a compact lesson for training QA failures."""
+        if not self._should_auto_record_negative_memory():
+            return False
+        try:
+            f1_value = float(f1_score)
+        except Exception:
+            f1_value = 0.0
+        if f1_value >= self._negative_memory_failure_threshold():
+            return False
+
+        key = self._negative_memory_key(question, ground_truth)
+        with self._negative_memory_write_lock:
+            limit = int(getattr(self.config, 'negative_memory_write_limit', 20) or 0)
+            if self._negative_memory_write_count >= limit:
+                return False
+            if key in self._negative_memory_written_keys:
+                return False
+
+            dataset = str(getattr(self.args, 'dataset', '') or 'unknown')
+            category_text = f"\nCategory: {category}" if category is not None else ""
+            problem = (
+                f"Dataset: {dataset}\n"
+                f"Conversation: {conversation_id or 'unknown'}{category_text}\n"
+                f"Question: {self._compact_negative_memory_text(question, 900)}"
+            )
+            correction = f"Expected answer: {self._compact_negative_memory_text(ground_truth, 900)}"
+
+            if self.negative_memory_store.has_entry_for(problem, correction):
+                self._negative_memory_written_keys.add(key)
+                return False
+
+            retrieved = retrieved_memories or []
+            retrieved_text = ""
+            if retrieved:
+                compact = [
+                    self._compact_negative_memory_text(mem, 260)
+                    for mem in retrieved[:3]
+                ]
+                retrieved_text = "\nRetrieved memories: " + " | ".join(compact)
+
+            try:
+                judge_value = float(llm_judge_score or 0.0)
+            except Exception:
+                judge_value = 0.0
+            wrong_behavior = (
+                f"Model answer had F1={f1_value:.4f} and LLM judge={judge_value:.4f}. "
+                f"Prediction: {self._compact_negative_memory_text(prediction or '[empty]', 900)}"
+                f"{retrieved_text}"
+            )
+            lesson = (
+                "For similar memory QA questions, first identify the exact entity, time, "
+                "relationship, and requested attribute. Use retrieved memories as evidence, "
+                "preserve durable factual details during memory construction, and avoid "
+                "guessing when the retrieved memory does not support the answer."
+            )
+            trigger = (
+                f"Similar {dataset} question requiring entity-specific or time-specific recall: "
+                f"{self._compact_negative_memory_text(question, 500)}"
+            )
+            tags = ["auto_failure", dataset]
+            if category is not None:
+                tags.append(f"category_{category}")
+            title_parts = ["auto failure", dataset]
+            if conversation_id:
+                title_parts.append(str(conversation_id))
+            if qa_idx is not None:
+                title_parts.append(str(qa_idx))
+            title = " ".join(title_parts)
+            user_id = getattr(self.args, 'user_id', None) or getattr(self.config, 'user_id', None)
+
+            path = self.negative_memory_store.write_entry(
+                problem=problem,
+                wrong_behavior=wrong_behavior,
+                correction=correction,
+                lesson=lesson,
+                trigger=trigger,
+                user_id=user_id,
+                tags=tags,
+                title=title,
+            )
+            self._negative_memory_written_keys.add(key)
+            self._negative_memory_write_count += 1
+            self.log(f"[NegativeMemory] Auto-recorded training failure lesson: {path}")
+            return True
 
     def _skill_node_to_operation(self, node) -> Operation:
         """Adapt a markdown skill-tree node to the executor's Operation interface."""
@@ -1181,6 +1313,7 @@ class BaseTrainer:
         # Compute scores and collect cases (rolling failure pool)
         reward_metric = getattr(self.config, 'reward_metric', 'f1').lower()
         collect_cases = (self.designer is not None)
+        collect_negative_memory = self._should_auto_record_negative_memory()
         f1_threshold = getattr(self.config, 'designer_f1_threshold', 0.5)
         need_llm_judge = reward_metric == 'llm_judge'
 
@@ -1191,8 +1324,8 @@ class BaseTrainer:
             qa_list, valid_qa_indices, ret, reward_metric, eval_args
         )
 
-        if collect_cases:
-            # Collect cases
+        if collect_cases or collect_negative_memory:
+            # Collect designer cases and/or automatic negative memories.
             for qa_idx in valid_qa_indices:
                 qa = qa_list[qa_idx]
                 retrieved_mems, retrieved_indices = retrieval_info.get(qa_idx, ([], []))
@@ -1212,24 +1345,38 @@ class BaseTrainer:
                 else:
                     is_correct = (f1 >= f1_threshold)
 
-                case = DesignerCase(
-                    query_id=f"{conversation_id}_{qa_idx}" if conversation_id else str(qa_idx),
-                    question=qa['question'],
-                    ground_truth=case_ground_truth_str,
-                    evidence=qa.get('evidence', None),
-                    category=qa.get('category', None),
-                    memory_bank_snapshot=memory_snapshot,
-                    retrieved_memories=retrieved_mems,
-                    retrieved_indices=retrieved_indices,
-                    prediction=prediction,
-                    is_correct=is_correct,
-                    f1_score=f1,
-                    llm_judge_score=judge_score,
-                    conversation_id=conversation_id,
-                    epoch=outer_epoch * self.config.inner_epochs + inner_epoch,
-                    step=step
-                )
-                self.designer.case_collector.add_case(case)
+                if collect_cases:
+                    case = DesignerCase(
+                        query_id=f"{conversation_id}_{qa_idx}" if conversation_id else str(qa_idx),
+                        question=qa['question'],
+                        ground_truth=case_ground_truth_str,
+                        evidence=qa.get('evidence', None),
+                        category=qa.get('category', None),
+                        memory_bank_snapshot=memory_snapshot,
+                        retrieved_memories=retrieved_mems,
+                        retrieved_indices=retrieved_indices,
+                        prediction=prediction,
+                        is_correct=is_correct,
+                        f1_score=f1,
+                        llm_judge_score=judge_score,
+                        conversation_id=conversation_id,
+                        epoch=outer_epoch * self.config.inner_epochs + inner_epoch,
+                        step=step
+                    )
+                    self.designer.case_collector.add_case(case)
+
+                if collect_negative_memory and not is_correct:
+                    self._maybe_record_negative_memory_failure(
+                        question=qa['question'],
+                        ground_truth=case_ground_truth_str,
+                        prediction=prediction,
+                        f1_score=f1,
+                        llm_judge_score=judge_score,
+                        category=qa.get('category', None),
+                        conversation_id=conversation_id,
+                        qa_idx=qa_idx,
+                        retrieved_memories=retrieved_mems,
+                    )
 
         return avg_reward, avg_reward
 

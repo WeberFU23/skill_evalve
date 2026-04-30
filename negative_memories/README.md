@@ -3,6 +3,10 @@
 This directory stores optional markdown negative memories. They are disabled by
 default and are loaded only when `--enable-negative-memory` is passed.
 
+Training can also create compact entries automatically when
+`--auto-record-negative-memory` is enabled. Automatic writes are intended for
+training failures only; evaluation should retrieve entries, not write new ones.
+
 Only markdown files with frontmatter `type: negative` or a `negative` tag are
 loaded. A negative memory should store a reusable mistake pattern, correction,
 lesson, and trigger. Do not store hidden chain-of-thought.

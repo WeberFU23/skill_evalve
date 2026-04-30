@@ -100,6 +100,9 @@ class AgenticMemoryConfig:
         self.negative_memory_dir = "./negative_memories"
         self.negative_memory_top_k = 3
         self.negative_memory_max_chars = 1200
+        self.auto_record_negative_memory = False
+        self.negative_memory_write_limit = 20
+        self.negative_memory_f1_threshold = None
 
         # Evolution feedback and early stopping
         self.max_designer_evolves = 6  # Maximum number of evolution cycles before stopping
@@ -373,6 +376,12 @@ def get_agentic_memory_args():
                         help='Top-k negative memories retrieved for executor/eval prompts')
     parser.add_argument('--negative-memory-max-chars', type=int, default=1200,
                         help='Max characters included from each negative memory')
+    parser.add_argument('--auto-record-negative-memory', action='store_true',
+                        help='During training, persist compact negative memories for QA failures')
+    parser.add_argument('--negative-memory-write-limit', type=int, default=20,
+                        help='Max auto-recorded negative memories per run; <=0 disables writes')
+    parser.add_argument('--negative-memory-f1-threshold', type=float, default=None,
+                        help='F1 below this threshold is auto-recorded as a negative memory; defaults to designer threshold')
 
     # Misc
     parser.add_argument('--seed', type=int, default=42)

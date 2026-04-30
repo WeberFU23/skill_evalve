@@ -30,6 +30,7 @@ The important flags are:
 --skill-tree-dir ./skills_memory
 --enable-negative-memory
 --negative-memory-dir ./negative_memories
+--auto-record-negative-memory
 ```
 
 `skills_memory/` contains executable memory skills:
@@ -51,6 +52,11 @@ Only markdown files with `type: negative` or a `negative` tag are loaded from
 
 Do not store hidden chain-of-thought. Store the reusable wrong pattern,
 correction, trigger, and lesson.
+
+`train_locomo_skill_tree.sh` also passes `--auto-record-negative-memory`, so
+training QA failures are written as compact markdown lessons, up to
+`--negative-memory-write-limit`. Evaluation does not write new negative
+memories, which avoids contaminating the test set with test answers.
 
 You can write one entry manually:
 
