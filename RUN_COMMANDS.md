@@ -28,6 +28,7 @@ The important flags are:
 ```bash
 --enable-skill-tree
 --skill-tree-dir ./skills_memory
+--enable-skill-tree-evolution
 --enable-negative-memory
 --negative-memory-dir ./negative_memories
 --auto-record-negative-memory
@@ -53,10 +54,40 @@ Only markdown files with `type: negative` or a `negative` tag are loaded from
 Do not store hidden chain-of-thought. Store the reusable wrong pattern,
 correction, trigger, and lesson.
 
+You can record a user/evaluator correction dialogue directly:
+
+```bash
+python -B record_negative_memory.py \
+  --dialogue-file ./correction_dialogue.txt \
+  --title "entity recall correction" \
+  --user-id "user_123" \
+  --tag locomo
+```
+
+Use `--dialogue-file -` to read the dialogue from stdin, or `--dry-run` to
+preview the generated fields without writing a markdown file.
+
 `train_locomo_skill_tree.sh` also passes `--auto-record-negative-memory`, so
 training QA failures are written as compact markdown lessons, up to
 `--negative-memory-write-limit`. Evaluation does not write new negative
 memories, which avoids contaminating the test set with test answers.
+
+## 4. Skill-Tree Hard-Case Evolution
+
+`train_locomo_skill_tree.sh` passes `--enable-skill-tree-evolution`. During
+training, failed QA cases are grounded back to the skill-tree paths that created
+the retrieved memories. At the end of an outer epoch, the designer can refine an
+implicated skill node or add one child node under it.
+
+The script limits evolution to one hard-case bucket per run:
+
+```bash
+--skill-tree-evolution-min-cases 5
+--skill-tree-evolution-max-buckets 1
+```
+
+This keeps the lite LoCoMo run cheap and avoids broad edits from a single small
+experiment. Evolved markdown files are written under `skills_memory/`.
 
 You can write one entry manually:
 

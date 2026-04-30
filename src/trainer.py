@@ -27,6 +27,7 @@ from src.designer import Designer, DesignerCase, EvolutionSnapshotManager
 from src.negative_memory import NegativeMemoryStore
 from src.skill_tree import SkillTree, SkillTreeSelector
 from src.skill_tree_evolution import (
+    SkillHardCase,
     SkillHardCaseCollector,
     SkillTreeEvolutionDesigner,
     hard_case_from_selection,
@@ -587,12 +588,18 @@ class BaseTrainer:
         if self.skill_tree_designer is None or self.skill_hard_case_collector is None:
             return []
         min_cases = getattr(self.config, 'skill_tree_evolution_min_cases', 2)
+        max_buckets = getattr(self.config, 'skill_tree_evolution_max_buckets', 3)
         results = self.skill_tree_designer.evolve_from_collector(
             self.skill_hard_case_collector,
-            min_cases=min_cases
+            min_cases=min_cases,
+            max_buckets=max_buckets
         )
         applied = sum(1 for result in results if result.get('applied'))
         self.log(f"Skill-tree evolution processed {len(results)} bucket(s), applied {applied} change(s)")
+        if applied > 0 and self.skill_tree is not None:
+            self.skill_tree.load()
+            if self.skill_tree_selector is not None:
+                self.skill_tree_selector.tree = self.skill_tree
         return results
 
     def _get_skill_scope_ids(self) -> List[str]:
@@ -781,6 +788,185 @@ class BaseTrainer:
             self.log(f"[NegativeMemory] Auto-recorded training failure lesson: {path}")
             return True
 
+    def _should_collect_skill_tree_hard_cases(self) -> bool:
+        return self.skill_hard_case_collector is not None and not bool(
+            getattr(self.args, 'eval_only', False)
+        )
+
+    def _skill_tree_failure_threshold(self) -> float:
+        threshold = getattr(self.config, 'skill_tree_failure_f1_threshold', None)
+        if threshold is None:
+            threshold = getattr(self.config, 'designer_f1_threshold', 0.5)
+        try:
+            return float(threshold)
+        except Exception:
+            return 0.5
+
+    def _operation_name_to_skill_path(self, op_name: str) -> Optional[str]:
+        prefix = "skill_tree::"
+        op_name = str(op_name or "").strip()
+        if not op_name.startswith(prefix):
+            return None
+        path = op_name[len(prefix):].strip()
+        return path or None
+
+    def _compact_text(self, text: str, max_chars: int = 1000) -> str:
+        text = re.sub(r"\s+", " ", str(text or "")).strip()
+        if len(text) <= max_chars:
+            return text
+        return text[:max_chars].rstrip() + " ...[truncated]"
+
+    def _skill_paths_from_retrieved_memories(self, memory_bank: MemoryBank,
+                                             retrieved_indices: List[int]) -> Tuple[List[str], List[Dict[str, Any]]]:
+        paths = []
+        seen_paths = set()
+        memory_actions = []
+        for idx in retrieved_indices or []:
+            try:
+                mem = memory_bank.get_memory_at(int(idx))
+            except Exception:
+                continue
+            op_history = list(getattr(mem, 'operation_history', []) or [])
+            item_paths = []
+            for op_name in op_history:
+                path = self._operation_name_to_skill_path(op_name)
+                if not path:
+                    continue
+                item_paths.append(path)
+                if path not in seen_paths:
+                    seen_paths.add(path)
+                    paths.append(path)
+            metadata = getattr(mem, 'metadata', {}) or {}
+            metadata_paths = metadata.get('skill_tree_paths', [])
+            if isinstance(metadata_paths, str):
+                metadata_paths = [metadata_paths]
+            for path in metadata_paths or []:
+                path = str(path).strip()
+                if path and path not in seen_paths:
+                    seen_paths.add(path)
+                    paths.append(path)
+            memory_actions.append({
+                "memory_index": int(idx),
+                "content": self._compact_text(getattr(mem, 'content', ''), 600),
+                "operation_history": op_history,
+                "skill_tree_paths": item_paths,
+            })
+        return paths, memory_actions
+
+    def _skill_paths_from_episode_steps(self,
+                                        episode_steps: Optional[List[Dict[str, Any]]] = None) -> List[str]:
+        paths = []
+        seen = set()
+        for step in episode_steps or []:
+            for path in step.get('selected_skill_paths', []) or []:
+                path = str(path).strip()
+                if path and path not in seen:
+                    seen.add(path)
+                    paths.append(path)
+        return paths
+
+    def _routing_trace_from_episode_steps(self, selected_paths: List[str],
+                                          episode_steps: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
+        selected_set = set(selected_paths or [])
+        trace = []
+        for step in episode_steps or []:
+            step_paths = set(step.get('selected_skill_paths', []) or [])
+            if selected_set and not step_paths.intersection(selected_set):
+                continue
+            for route in step.get('skill_tree_routing', []) or []:
+                if isinstance(route, dict):
+                    trace.append(dict(route))
+            if len(trace) >= 12:
+                break
+        return trace
+
+    def _summarize_skill_prompt(self, selected_paths: List[str]) -> str:
+        if self.skill_tree is None:
+            return ""
+        blocks = []
+        for path in selected_paths[:6]:
+            try:
+                node = self.skill_tree.get_node(path)
+            except KeyError:
+                continue
+            blocks.append(
+                f"## Skill: {path}\n"
+                f"{self._compact_text(node.instruction_text(), 1200)}"
+            )
+        return "\n\n".join(blocks)
+
+    def _maybe_record_skill_tree_hard_case_failure(
+        self,
+        *,
+        question: str,
+        ground_truth: str,
+        prediction: str,
+        f1_score: float,
+        llm_judge_score: float = 0.0,
+        is_correct: bool = False,
+        category=None,
+        conversation_id: Optional[str] = None,
+        qa_idx: Optional[int] = None,
+        retrieved_memories: Optional[List[str]] = None,
+        retrieved_indices: Optional[List[int]] = None,
+        memory_bank: Optional[MemoryBank] = None,
+        episode_steps: Optional[List[Dict[str, Any]]] = None,
+    ) -> bool:
+        """Record a QA failure as a hard case under the implicated skill-tree paths."""
+        if not self._should_collect_skill_tree_hard_cases() or is_correct:
+            return False
+        try:
+            f1_value = float(f1_score)
+        except Exception:
+            f1_value = 0.0
+        if f1_value >= self._skill_tree_failure_threshold():
+            return False
+
+        selected_paths = []
+        memory_actions = []
+        if memory_bank is not None:
+            selected_paths, memory_actions = self._skill_paths_from_retrieved_memories(
+                memory_bank,
+                list(retrieved_indices or [])
+            )
+
+        failure_type = "retrieved_skill_low_f1"
+        if not selected_paths:
+            selected_paths = self._skill_paths_from_episode_steps(episode_steps)
+            failure_type = "episode_skill_low_f1"
+        if not selected_paths:
+            return False
+
+        retrieved = list(retrieved_memories or [])
+        context = "Retrieved memories:\n" + "\n".join(
+            f"- {self._compact_text(mem, 800)}" for mem in retrieved[:8]
+        )
+        metadata = {
+            "conversation_id": conversation_id,
+            "qa_idx": qa_idx,
+            "category": category,
+            "retrieved_indices": list(retrieved_indices or []),
+            "llm_judge_score": llm_judge_score,
+        }
+        case = SkillHardCase(
+            problem_id=f"{conversation_id}_{qa_idx}" if conversation_id is not None else str(qa_idx),
+            query=str(question),
+            context=context,
+            prediction=self._compact_text(prediction, 1200),
+            ground_truth=str(ground_truth),
+            reward=f1_value,
+            is_success=False,
+            failure_type=failure_type,
+            selected_skill_paths=selected_paths,
+            routing_trace=self._routing_trace_from_episode_steps(selected_paths, episode_steps),
+            summarized_skill_prompt=self._summarize_skill_prompt(selected_paths),
+            retrieved_memories=retrieved[:10],
+            memory_actions=memory_actions,
+            metadata=metadata,
+        )
+        self.skill_hard_case_collector.add_case(case)
+        return True
+
     def _skill_node_to_operation(self, node) -> Operation:
         """Adapt a markdown skill-tree node to the executor's Operation interface."""
         update_type = node.update_type or "noop"
@@ -914,7 +1100,8 @@ class BaseTrainer:
             conversation_id=conversation_id,
             outer_epoch=outer_epoch,
             inner_epoch=inner_epoch,
-            step=steps_processed  # step = number of sessions processed
+            step=steps_processed,  # step = number of sessions processed
+            episode_steps=episode_log['steps']
         )
         episode_log['final_qa_performance'] = qa_performance
         episode_log['raw_performance'] = raw_performance
@@ -1195,7 +1382,8 @@ class BaseTrainer:
 
     def _evaluate_qa(self, conversation_data: Dict, memory_bank: MemoryBank,
                      conversation_id: str = None, outer_epoch: int = 0,
-                     inner_epoch: int = 0, step: int = 0):
+                     inner_epoch: int = 0, step: int = 0,
+                     episode_steps: Optional[List[Dict[str, Any]]] = None):
         """
         Evaluate QA performance on the conversation.
 
@@ -1314,6 +1502,7 @@ class BaseTrainer:
         reward_metric = getattr(self.config, 'reward_metric', 'f1').lower()
         collect_cases = (self.designer is not None)
         collect_negative_memory = self._should_auto_record_negative_memory()
+        collect_skill_tree_cases = self._should_collect_skill_tree_hard_cases()
         f1_threshold = getattr(self.config, 'designer_f1_threshold', 0.5)
         need_llm_judge = reward_metric == 'llm_judge'
 
@@ -1324,8 +1513,8 @@ class BaseTrainer:
             qa_list, valid_qa_indices, ret, reward_metric, eval_args
         )
 
-        if collect_cases or collect_negative_memory:
-            # Collect designer cases and/or automatic negative memories.
+        if collect_cases or collect_negative_memory or collect_skill_tree_cases:
+            # Collect designer cases, skill-tree hard cases, and/or automatic negative memories.
             for qa_idx in valid_qa_indices:
                 qa = qa_list[qa_idx]
                 retrieved_mems, retrieved_indices = retrieval_info.get(qa_idx, ([], []))
@@ -1376,6 +1565,23 @@ class BaseTrainer:
                         conversation_id=conversation_id,
                         qa_idx=qa_idx,
                         retrieved_memories=retrieved_mems,
+                    )
+
+                if collect_skill_tree_cases and not is_correct:
+                    self._maybe_record_skill_tree_hard_case_failure(
+                        question=qa['question'],
+                        ground_truth=case_ground_truth_str,
+                        prediction=prediction,
+                        f1_score=f1,
+                        llm_judge_score=judge_score,
+                        is_correct=is_correct,
+                        category=qa.get('category', None),
+                        conversation_id=conversation_id,
+                        qa_idx=qa_idx,
+                        retrieved_memories=retrieved_mems,
+                        retrieved_indices=retrieved_indices,
+                        memory_bank=memory_bank,
+                        episode_steps=episode_steps,
                     )
 
         return avg_reward, avg_reward
@@ -1699,6 +1905,10 @@ class BaseTrainer:
                 parse_fail_count = sum(step.get('parse_fail_count', 0) for step in batch_steps)
                 parse_total = sum(step.get('parse_total', 0) for step in batch_steps)
                 parse_fail_rate = parse_fail_count / max(parse_total, 1)
+                skill_tree_case_count = (
+                    len(self.skill_hard_case_collector.get_all_cases())
+                    if self.skill_hard_case_collector is not None else 0
+                )
 
                 wandb_log = {
                     # Training metrics
@@ -1732,6 +1942,11 @@ class BaseTrainer:
                     'train/global_step': global_step,
                     'train/parse_fail_count': parse_fail_count,
                     'train/parse_fail_rate': parse_fail_rate,
+                    'skill_tree/hard_case_count': skill_tree_case_count,
+                    'skill_tree/num_nodes': (
+                        len(self.skill_tree.nodes_by_path)
+                        if self.skill_tree is not None else 0
+                    ),
                     # Operation statistics
                     'operation/num_operations': len(self.operation_bank.operations),
                     'operation/match_rate': match_rate,
@@ -1989,6 +2204,49 @@ class BaseTrainer:
                     'evolution/num_snapshots': len(self.snapshot_manager.snapshots),
                     'evolution/failed_attempts_accumulated': len(self.snapshot_manager.failed_evolution_attempts),
                     'evolution/used_saved_cases': 1 if use_saved_cases else 0,
+                }, step=outer_epoch_last_step)
+
+            if (
+                self.skill_tree_designer is not None
+                and (outer_epoch + 1) % max(1, int(getattr(self.config, 'skill_tree_evolution_freq', 1) or 1)) == 0
+            ):
+                hard_case_count = len(self.skill_hard_case_collector.get_all_cases())
+                self.log(f"\n{'='*80}")
+                self.log("Evolving Skill Tree...")
+                self.log(f"{'='*80}")
+                self.log(f"Skill-tree hard case pool size: {hard_case_count} cases")
+
+                skill_tree_results = self.run_skill_tree_evolution()
+                skill_tree_applied = sum(1 for result in skill_tree_results if result.get('applied'))
+                action_map = {'no_change': 0, 'refine_node': 1, 'add_child_node': 2}
+                action_counts = {}
+                for result in skill_tree_results:
+                    action = str(result.get('action', 'no_change'))
+                    action_counts[action] = action_counts.get(action, 0) + 1
+                    self.log(
+                        "[SkillTreeEvolution] "
+                        f"action={action} applied={bool(result.get('applied'))} "
+                        f"reason={result.get('reasoning', 'N/A')}"
+                    )
+                if skill_tree_results:
+                    self.skill_hard_case_collector.clear()
+                    self.log("Cleared processed skill-tree hard cases.")
+
+                self._wandb_log({
+                    'skill_tree/evolution_processed_buckets': len(skill_tree_results),
+                    'skill_tree/evolution_applied': skill_tree_applied,
+                    'skill_tree/evolution_hard_cases': hard_case_count,
+                    'skill_tree/evolution_refine_node': action_counts.get('refine_node', 0),
+                    'skill_tree/evolution_add_child_node': action_counts.get('add_child_node', 0),
+                    'skill_tree/evolution_no_change': action_counts.get('no_change', 0),
+                    'skill_tree/evolution_action_max': max(
+                        [action_map.get(str(result.get('action', 'no_change')), 0)
+                         for result in skill_tree_results] or [0]
+                    ),
+                    'skill_tree/num_nodes': (
+                        len(self.skill_tree.nodes_by_path)
+                        if self.skill_tree is not None else 0
+                    ),
                 }, step=outer_epoch_last_step)
 
             # Store logs

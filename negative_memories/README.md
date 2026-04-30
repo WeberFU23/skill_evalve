@@ -7,6 +7,20 @@ Training can also create compact entries automatically when
 `--auto-record-negative-memory` is enabled. Automatic writes are intended for
 training failures only; evaluation should retrieve entries, not write new ones.
 
+User or evaluator correction dialogues can be converted into entries with:
+
+```bash
+python -B record_negative_memory.py \
+  --dialogue-file ./correction_dialogue.txt \
+  --title "user correction" \
+  --user-id "user_123" \
+  --tag correction
+```
+
+The script extracts a correction-like line when possible and stores the
+dialogue as the problem context. Use `--dry-run` to inspect the generated fields
+before writing.
+
 Only markdown files with frontmatter `type: negative` or a `negative` tag are
 loaded. A negative memory should store a reusable mistake pattern, correction,
 lesson, and trigger. Do not store hidden chain-of-thought.

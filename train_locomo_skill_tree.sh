@@ -36,6 +36,9 @@ python -B main.py \
     --skill-tree-dir ./skills_memory \
     --skill-tree-top-k 3 \
     --skill-tree-max-depth 4 \
+    --enable-skill-tree-evolution \
+    --skill-tree-evolution-min-cases 5 \
+    --skill-tree-evolution-max-buckets 1 \
     --enable-negative-memory \
     --negative-memory-dir ./negative_memories \
     --negative-memory-top-k 3 \

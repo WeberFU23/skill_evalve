@@ -93,6 +93,9 @@ class AgenticMemoryConfig:
         self.enable_skill_tree_evolution = False
         self.skill_tree_failure_pool_size = 1000
         self.skill_tree_evolution_min_cases = 2
+        self.skill_tree_evolution_freq = 1
+        self.skill_tree_evolution_max_buckets = 3
+        self.skill_tree_failure_f1_threshold = None
 
         # Negative memory settings. Negative memories are markdown lessons from
         # prior mistakes or user corrections, retrieved as prompt guardrails.
@@ -368,6 +371,12 @@ def get_agentic_memory_args():
                         help='Maximum hard cases kept for skill-tree evolution')
     parser.add_argument('--skill-tree-evolution-min-cases', type=int, default=2,
                         help='Minimum cases in a path bucket before skill-tree evolution')
+    parser.add_argument('--skill-tree-evolution-freq', type=int, default=1,
+                        help='Run skill-tree evolution every N outer epochs')
+    parser.add_argument('--skill-tree-evolution-max-buckets', type=int, default=3,
+                        help='Maximum hard-case path buckets evolved per cycle; <=0 means no limit')
+    parser.add_argument('--skill-tree-failure-f1-threshold', type=float, default=None,
+                        help='F1 below this threshold is collected as a skill-tree hard case; defaults to designer threshold')
     parser.add_argument('--enable-negative-memory', action='store_true',
                         help='Retrieve markdown negative memories as prompt guardrails')
     parser.add_argument('--negative-memory-dir', type=str, default='./negative_memories',

@@ -200,10 +200,18 @@ class SkillTreeEvolutionDesigner:
         self.designer_model = getattr(args, "designer_model", None) or getattr(args, "model", "")
 
     def evolve_from_collector(self, collector: SkillHardCaseCollector,
-                              min_cases: int = 2) -> List[Dict[str, Any]]:
+                              min_cases: int = 2,
+                              max_buckets: Optional[int] = None) -> List[Dict[str, Any]]:
         """Evolve the tree for each path bucket with enough hard cases."""
         results = []
-        for path_key, cases in collector.grouped_by_path(min_cases=min_cases).items():
+        buckets = list(collector.grouped_by_path(min_cases=min_cases).items())
+        buckets.sort(
+            key=lambda item: (sum(case.fail_count for case in item[1]), len(item[1])),
+            reverse=True,
+        )
+        if max_buckets is not None and int(max_buckets) > 0:
+            buckets = buckets[:int(max_buckets)]
+        for path_key, cases in buckets:
             result = self.evolve_cases(cases, implicated_paths=list(path_key))
             results.append(result)
         return results
@@ -395,6 +403,7 @@ class SkillTreeEvolutionDesigner:
             "visibility": str(result.get("visibility") or parent.visibility or "shared"),
             "scope_id": result.get("scope_id", parent.scope_id),
             "tags": [str(tag) for tag in tags],
+            "update_type": result.get("update_type", parent.update_type),
         }
 
         os.makedirs(child_dir, exist_ok=True)
@@ -471,7 +480,7 @@ def _format_markdown(metadata: Dict[str, Any], body: str) -> str:
 
 def _format_frontmatter(metadata: Dict[str, Any]) -> str:
     lines = ["---"]
-    for key in ("id", "name", "visibility", "scope_id", "tags"):
+    for key in ("id", "name", "visibility", "scope_id", "tags", "update_type"):
         value = metadata.get(key)
         if key == "tags":
             tags = value if isinstance(value, list) else []
