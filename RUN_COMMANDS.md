@@ -42,6 +42,23 @@ The important flags are:
 - `delete`
 - `noop`
 
+To run the matching skill-tree checkpoint without loading negative memories,
+use the ablation script:
+
+```bash
+bash eval_locomo_skill_tree_no_negative.sh
+```
+
+Do not hand-write this ablation from `main.py` defaults unless you also pass the
+same checkpoint encoder flags used by training:
+
+```bash
+--state-encoder sentence-transformers/all-MiniLM-L6-v2
+--op-encoder sentence-transformers/all-MiniLM-L6-v2
+```
+
+The PPO checkpoint stores controller weights sized for those encoders.
+
 ## 3. Negative Memories
 
 Negative memories are markdown lessons from mistakes or user corrections. They
