@@ -144,7 +144,8 @@ class NegativeMemoryStore:
                 entry.embedding = embedding
 
     def retrieve(self, query: str, top_k: int = 3,
-                 scope_ids: Optional[Iterable[str]] = None) -> List[str]:
+                 scope_ids: Optional[Iterable[str]] = None,
+                 min_score: Optional[float] = None) -> List[str]:
         if top_k is None or int(top_k) <= 0:
             return []
         with self._lock:
@@ -162,7 +163,17 @@ class NegativeMemoryStore:
             else:
                 ranked = _rank_by_keyword(query, visible)
 
-            return [entry.prompt_text(self.max_chars_per_memory) for entry in ranked[:actual_k]]
+            if min_score is not None:
+                try:
+                    threshold = float(min_score)
+                    ranked = [(score, entry) for score, entry in ranked if score >= threshold]
+                except Exception:
+                    pass
+
+            return [
+                entry.prompt_text(self.max_chars_per_memory)
+                for _, entry in ranked[:actual_k]
+            ]
 
     def has_entry_for(self, problem: str, correction: str) -> bool:
         """Return True if an equivalent problem/correction pair is already stored."""
@@ -245,17 +256,17 @@ def _encode_texts(encoder, texts) -> np.ndarray:
 
 
 def _rank_by_embedding(query_embedding: np.ndarray,
-                       entries: List[NegativeMemoryEntry]) -> List[NegativeMemoryEntry]:
+                       entries: List[NegativeMemoryEntry]):
     query = _normalize(query_embedding)
     scored = []
     for entry in entries:
         scored.append((float(np.dot(query, _normalize(entry.embedding))), entry))
     scored.sort(key=lambda item: item[0], reverse=True)
-    return [entry for _, entry in scored]
+    return scored
 
 
 def _rank_by_keyword(query: str,
-                     entries: List[NegativeMemoryEntry]) -> List[NegativeMemoryEntry]:
+                     entries: List[NegativeMemoryEntry]):
     query_terms = _token_set(query)
     scored = []
     for entry in entries:
@@ -263,7 +274,7 @@ def _rank_by_keyword(query: str,
         score = len(query_terms & terms) / max(len(query_terms), 1)
         scored.append((score, entry))
     scored.sort(key=lambda item: item[0], reverse=True)
-    return [entry for _, entry in scored]
+    return scored
 
 
 def _token_set(text: str) -> set:

@@ -8,6 +8,12 @@ export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
 export WANDB_MODE="${WANDB_MODE:-offline}"
 export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
 
+NEGATIVE_MEMORY_TOP_K="${NEGATIVE_MEMORY_TOP_K:-3}"
+NEGATIVE_MEMORY_ARGS=()
+if [[ -n "${NEGATIVE_MEMORY_MIN_SCORE:-}" ]]; then
+    NEGATIVE_MEMORY_ARGS+=(--negative-memory-min-score "$NEGATIVE_MEMORY_MIN_SCORE")
+fi
+
 python -B main.py \
     --disable-flash-attn \
     --memory-cache-suffix "locomo_skill_tree_eval" \
@@ -41,7 +47,8 @@ python -B main.py \
     --skill-tree-max-depth 4 \
     --enable-negative-memory \
     --negative-memory-dir ./negative_memories \
-    --negative-memory-top-k 3 \
+    --negative-memory-top-k "$NEGATIVE_MEMORY_TOP_K" \
+    "${NEGATIVE_MEMORY_ARGS[@]}" \
     --skip-load-snapshot-manager \
     --wandb-run-name locomo-skill-tree-eval \
     --save-dir ./checkpoints/locomo_skill_tree \

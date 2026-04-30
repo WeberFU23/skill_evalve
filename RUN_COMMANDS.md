@@ -59,6 +59,20 @@ same checkpoint encoder flags used by training:
 
 The PPO checkpoint stores controller weights sized for those encoders.
 
+To test whether negative memory retrieval is adding noise, sweep the prompt
+guardrail count and optional similarity threshold:
+
+```bash
+NEGATIVE_MEMORY_TOP_K=1 bash eval_locomo_skill_tree.sh
+NEGATIVE_MEMORY_TOP_K=2 bash eval_locomo_skill_tree.sh
+NEGATIVE_MEMORY_TOP_K=3 bash eval_locomo_skill_tree.sh
+NEGATIVE_MEMORY_TOP_K=3 NEGATIVE_MEMORY_MIN_SCORE=0.35 bash eval_locomo_skill_tree.sh
+```
+
+`NEGATIVE_MEMORY_MIN_SCORE` filters out retrieved negative memories below the
+embedding/keyword similarity score. Leave it unset to preserve the original
+top-k behavior.
+
 ## 3. Negative Memories
 
 Negative memories are markdown lessons from mistakes or user corrections. They

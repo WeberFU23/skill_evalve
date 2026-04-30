@@ -640,7 +640,8 @@ class BaseTrainer:
         return self.negative_memory_store.retrieve(
             query=query,
             top_k=top_k,
-            scope_ids=self._get_skill_scope_ids()
+            scope_ids=self._get_skill_scope_ids(),
+            min_score=getattr(self.config, 'negative_memory_min_score', None)
         )
 
     def add_negative_memory_context_to_prompt(self, prompt: str, query: str) -> str:

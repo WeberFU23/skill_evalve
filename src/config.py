@@ -103,6 +103,7 @@ class AgenticMemoryConfig:
         self.negative_memory_dir = "./negative_memories"
         self.negative_memory_top_k = 3
         self.negative_memory_max_chars = 1200
+        self.negative_memory_min_score = None
         self.auto_record_negative_memory = False
         self.negative_memory_write_limit = 20
         self.negative_memory_f1_threshold = None
@@ -385,6 +386,8 @@ def get_agentic_memory_args():
                         help='Top-k negative memories retrieved for executor/eval prompts')
     parser.add_argument('--negative-memory-max-chars', type=int, default=1200,
                         help='Max characters included from each negative memory')
+    parser.add_argument('--negative-memory-min-score', type=float, default=None,
+                        help='Drop retrieved negative memories below this similarity score')
     parser.add_argument('--auto-record-negative-memory', action='store_true',
                         help='During training, persist compact negative memories for QA failures')
     parser.add_argument('--negative-memory-write-limit', type=int, default=20,
